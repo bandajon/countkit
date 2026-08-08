@@ -10,9 +10,11 @@ from pathlib import Path
 
 import uvicorn
 import yaml
-from fastapi import Body, FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import Body, FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
+
+import calib
 
 PKG = Path(__file__).resolve().parent
 # Everything the operator owns (config.yaml, ./data, ./ingest) hangs off ROOT; the
@@ -95,6 +97,7 @@ if not CONFIG_PATH.exists():      # first boot
     print(f"created {CONFIG_PATH} from {EXAMPLE_PATH.name}", flush=True)
 
 load_config()
+calib.DATA_ROOT = data_root()
 
 app = FastAPI(title="CountKit")
 app.mount("/static", StaticFiles(directory=PKG / "static"), name="static")
@@ -162,6 +165,58 @@ def config_post(body: dict = Body(default={})):
     CONFIG_PATH.write_text(text)
     load_config()
     return {"ok": True}
+
+
+def _calib(fn, *a):
+    """calib speaks ValueError for operator error and LookupError for absent data;
+    both carry text the UI shows verbatim."""
+    try:
+        return fn(*a)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except LookupError as e:
+        raise HTTPException(404, str(e))
+
+
+# Declared before /{site}/{cam}: FastAPI matches in declaration order, and 'armmap'
+# is a legal camera name — a camera actually called armmap would be shadowed here.
+@app.get("/api/calib/{site}/armmap")
+def calib_armmap(site: str):
+    return _calib(calib.arm_map, site)
+
+
+@app.get("/api/calib/{site}/{cam}/versions")
+def calib_versions(site: str, cam: str):
+    return _calib(calib.list_versions, site, cam)
+
+
+@app.get("/api/calib/{site}/{cam}")
+def calib_get(site: str, cam: str, version: int = None):
+    return _calib(calib.get_calibration, site, cam, version)
+
+
+@app.post("/api/calib/{site}/{cam}")
+def calib_post(site: str, cam: str, doc: dict = Body(default={})):
+    saved = _calib(calib.save_calibration, site, cam, doc)
+    # The arm map comes back with the save: a new line can unown or double-own an arm,
+    # and the operator must see that without a second round trip.
+    return {**saved, "armmap": calib.arm_map(site)}
+
+
+@app.post("/api/calib/{site}/{cam}/activate")
+def calib_activate(site: str, cam: str, body: dict = Body(default={})):
+    return _calib(calib.set_active, site, cam, body.get("version"))
+
+
+@app.get("/api/frame/{site}/{cam}")
+def frame_get(site: str, cam: str):
+    return Response(_calib(calib.reference_frame, site, cam, ingest_root()),
+                    media_type="image/jpeg")
+
+
+@app.post("/api/frame/{site}/{cam}")
+async def frame_post(site: str, cam: str, request: Request):
+    return _calib(calib.save_reference, site, cam, await request.body())
 
 
 if __name__ == "__main__":
