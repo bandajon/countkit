@@ -38,6 +38,10 @@ nvinfer_config: ""
 
 # Licensed floating-car dataset for corroboration only (never a second count).
 # provider e.g. tomtom; dataset is a path under data_root. Empty = no probe UI anywhere.
+# The CSV is what a TomTom Traffic Stats export / the Stage-0 poller produces:
+#   site,arm,bin_start_iso,delay_s,speed_kmh,sample_n
+#   gerlache,Great East Rd,2026-08-04T07:00:00+02:00,42.5,18.3,14
+# sample_n travels with every figure — a delay built on 3 vehicles must look that thin.
 probe:
   provider: ""
   dataset: ""

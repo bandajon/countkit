@@ -16,6 +16,7 @@ from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+import aggregate
 import calib
 import engine
 
@@ -313,6 +314,32 @@ def analyze_stream():
                 SUBSCRIBERS.remove(q)
 
     return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+@app.get("/api/counts/{site}/{date}")
+def counts_get(site: str, date: str):
+    return aggregate.counts(site, date, data_root(), ingest_root(), CONFIG)
+
+
+@app.get("/api/offsets/{site}/{date}")
+def offsets_get(site: str, date: str):
+    """Every camera of the site-day, with null for the ones still unset."""
+    offs = engine.offsets(ingest_root(), date, site)
+    return {cam: offs.get(cam) for cam in engine.site_day_cams(ingest_root(), date, site)}
+
+
+@app.post("/api/offsets")
+def offsets_post(body: dict = Body(default={})):
+    site, date = body.get("site") or "", body.get("date") or ""
+    cam, off = body.get("cam") or "", body.get("offset_s")
+    if not (site and date and cam):
+        raise HTTPException(400, "site, date and cam are required")
+    if off is not None and not isinstance(off, (int, float)):
+        raise HTTPException(400, "offset_s must be a number of seconds, or null to unset")
+    try:
+        return aggregate.set_offset(ingest_root(), date, site, cam, off)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 if __name__ == "__main__":
