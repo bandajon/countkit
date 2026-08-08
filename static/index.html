@@ -337,8 +337,17 @@
     </div>
   </section>
   <section id="report">
-    <h2>Report — deliverable</h2>
-    <p class="empty">nothing to export yet · counts must exist before a report can be built</p>
+    <div class="row" style="margin-bottom:12px">
+      <select id="r-day" class="grow" aria-label="site-day"></select>
+    </div>
+    <div class="panel" id="rcard">
+      <p class="empty">nothing to export yet · counts must exist before a report can be built</p>
+    </div>
+    <div class="row">
+      <button class="btn go" id="r-go" disabled>Export Excel + PDF</button>
+      <span id="r-files" class="row"></span>
+    </div>
+    <div class="res" id="r-res"></div>
   </section>
 </main>
 
@@ -1273,7 +1282,7 @@ function odMatrix() {
   const f = d.pcu_factors || {};
   const grid = {};
   for (const c of cells) {
-    const k = c.entry + ' ' + c.exit;
+    const k = c.entry + '\u0000' + c.exit;
     const w = CNT.pcu ? (+f[c.cls] || 1) : 1;
     const g = grid[k] || (grid[k] = {n: 0, t2: 0});
     g.n += c.count * w; g.t2 += c.tier2_count * w;
@@ -1286,7 +1295,7 @@ function odMatrix() {
   for (const [i, en] of entries.entries()) {
     html += `<tr><th style="color:${accent(i)};text-align:left">${esc(en)}</th>`;
     for (const ex of exits) {
-      const g = grid[en + ' ' + ex];
+      const g = grid[en + '\u0000' + ex];
       const n = g ? (CNT.pcu ? Math.round(g.n * 10) / 10 : g.n) : 0;
       const inf = g && g.t2 ? Math.round(g.t2 / g.n * 100) : 0;
       // A client-facing number must never hide how confident it is.
@@ -1357,6 +1366,86 @@ function nocrop() {
 $('dr-close').onclick = () => { $('drawer').hidden = true; };
 addEventListener('hashchange', () => { if (location.hash.slice(2) === 'counts') countsInit(); });
 if (location.hash.slice(2) === 'counts') countsInit();
+
+// ---------------- Report tab: the client deliverable ----------------
+async function reportInit() {
+  const rows = await (await fetch('/api/ingest')).json();
+  const opts = [];
+  for (const r of rows) {
+    const st = await (await fetch(`/api/analyze/status/${r.site}/${r.date}`)).json();
+    opts.push(`<option value="${r.site}|${r.date}" data-ev="${st.events}">`
+      + `${r.date} · ${r.site}${st.events ? '' : ' · not analyzed'}</option>`);
+  }
+  $('r-day').innerHTML = opts.join('')
+    || '<option value="">nothing in the ingest tree yet</option>';
+  if (opts.length) reportCard();
+}
+
+async function reportCard() {
+  const [site, date] = ($('r-day').value || '|').split('|');
+  const box = $('rcard');
+  $('r-files').innerHTML = ''; $('r-res').textContent = '';
+  if (!site) { box.innerHTML = '<p class="empty">nothing to export</p>'; return; }
+  const events = +$('r-day').selectedOptions[0].dataset.ev;
+  if (!events) {
+    // Not exportable: say why, and link to the tab that fixes it.
+    $('r-go').disabled = true;
+    box.innerHTML = `<div class="eyebrow">not exportable</div>`
+      + `<div class="res bad">${date} · ${site} has not been analyzed —`
+      + ` <a href="#/analyze" style="color:inherit">queue it in Analyze</a></div>`;
+    return;
+  }
+  $('r-go').disabled = false;
+  const [c, st] = await Promise.all([
+    (await fetch(`/api/counts/${site}/${date}`)).json(),
+    (await fetch(`/api/report/${site}/${date}`)).json()]);
+  const p = c.qa.pairing, dot = {ok: 's-ok', warn: 's-warn', bad: 's-bad'}[p.state];
+  const unset = Object.entries(c.qa.offsets).filter(([, v]) => v === null).map(([k]) => k);
+  box.innerHTML = `<div class="row"><span class="grow mono" style="font-size:16px">`
+    + `${esc(site)} · ${date}</span><span class="state ${dot}">${p.state}</span></div>`
+    + `<div class="sub">${p.rate}% paired · ${p.same}% same-camera · ${p.inferred}% inferred`
+    + `${p.flagged ? ' · ' + p.flagged + ' flagged' : ''}</div>`
+    + `<div class="sub">coverage ${c.qa.coverage.expected_hours} h · cameras `
+    + `${Object.keys(c.qa.coverage.per_cam).join(' ')} · offsets `
+    + `${unset.length ? unset.join(', ') + ' UNSET' : 'all set ✓'}</div>`
+    + (c.qa.probe ? `<div class="sub">probe configured — a corroboration page is`
+        + ` included (© ${esc(c.qa.probe.provider)}, corroboration only)</div>` : '');
+  $('r-go').onclick = () => runExport(site, date);
+  if (st.exists) showFiles(site, date, st);
+}
+
+function showFiles(site, date, st) {
+  const files = Object.entries(st.files).filter(([n]) => n !== 'manifest.json');
+  $('r-files').innerHTML = files.map(([n]) =>
+    `<a class="btn" href="/api/report/file/${site}/${date}/${n}" download>`
+    + `${n.endsWith('.pdf') ? 'PDF' : 'Excel'}</a>`).join('');
+  // Custody discipline made visible, the same as the ingest footage.
+  // A fresh export answers with the absolute dir; the status route only has the manifest.
+  $('r-res').innerHTML = `<div class="mono" style="font-size:12px">`
+    + `${esc(st.dir || `data/reports/${site}/${date}`)}/</div>`
+    + `<div class="state s-ok" style="margin-top:6px">SHA256 MANIFEST</div>`
+    + files.map(([n, f]) => `<div class="mono" style="font-size:11px;color:var(--dim)">`
+        + `${n} · ${f.sha256.slice(0, 16)}… · ${(f.bytes / 1024).toFixed(0)} kB</div>`).join('')
+    + `<div class="sub">generated ${st.generated_iso || ''}</div>`;
+}
+
+async function runExport(site, date) {
+  const btn = $('r-go');
+  btn.disabled = true; btn.textContent = 'Exporting…';
+  const r = await post(`/api/report/${site}/${date}`, {});
+  btn.disabled = false; btn.textContent = 'Re-export';
+  if (!r.ok) {
+    $('r-res').className = 'res bad';
+    $('r-res').textContent = (await r.json()).detail;
+    return;
+  }
+  $('r-res').className = 'res';
+  showFiles(site, date, await r.json());
+}
+
+$('r-day').onchange = reportCard;
+addEventListener('hashchange', () => { if (location.hash.slice(2) === 'report') reportInit(); });
+if (location.hash.slice(2) === 'report') reportInit();
 </script>
 </body>
 </html>

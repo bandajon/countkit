@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 import aggregate
 import calib
 import engine
+import report
 
 PKG = Path(__file__).resolve().parent
 # Everything the operator owns (config.yaml, ./data, ./ingest) hangs off ROOT; the
@@ -322,6 +323,29 @@ def counts_get(site: str, date: str):
 
 
 CDN_BASE = ""     # Task 8 fills this in; empty means local crops only
+
+
+@app.post("/api/report/{site}/{date}")
+def report_build(site: str, date: str):
+    """Seconds for one site-day, so it runs inline rather than through the job queue."""
+    try:
+        return report.build(site, date, data_root(), ingest_root(), CONFIG)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/report/{site}/{date}")
+def report_status(site: str, date: str):
+    return report.status(data_root(), site, date)
+
+
+@app.get("/api/report/file/{site}/{date}/{name}")
+def report_file(site: str, date: str, name: str):
+    # Only names the manifest vouches for — no traversal, no stray files.
+    if name not in report.status(data_root(), site, date)["files"]:
+        raise HTTPException(404, "not in the export manifest")
+    return FileResponse(report.bundle_dir(data_root(), site, date) / name,
+                        filename=name)
 
 
 @app.get("/api/crop/{key:path}")
