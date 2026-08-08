@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>CountKit</title>
+<link rel="icon" href="data:,"><!-- silence the /favicon.ico request -->
+
+<style>
+  :root {
+    --bg:#111417; --panel:#191d21; --well:#0b0e10; --line:rgba(255,255,255,.14);
+    --fg:#e8eaec; --dim:#8a939b;
+    /* State only — never decoration. Used for 8px dots and text tints. */
+    --ok:#4a9e6f; --bad:#c25454; --warn:#c29a4a;
+    /* The one permitted extension: chart/diagram hues. Never on chrome. */
+    --entry:#86a8cf; --exit:#cfa886;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color-scheme: dark;   /* native checkboxes, date/time pickers and scrollbars follow */
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); -webkit-font-smoothing:antialiased;
+         font:16px/1.45 "Avenir Next", Inter, system-ui, -apple-system, sans-serif; }
+  /* Machine data is always mono + tabular so columns of numbers line up. */
+  .mono, #rail b, input, select, textarea { font-family:var(--mono); font-variant-numeric:tabular-nums; }
+
+  header { display:flex; align-items:center; gap:14px; padding:12px;
+           border-bottom:1px solid var(--line); }
+  .wordmark { font:600 15px/1 var(--mono); letter-spacing:.22em; text-transform:uppercase; }
+  /* State = a coloured dot beside neutral text. No filled pills anywhere. */
+  .state { display:inline-flex; align-items:center; gap:7px;
+           font:600 12px/1 var(--mono); letter-spacing:.06em; text-transform:uppercase; }
+  .state::before { content:''; width:8px; height:8px; border-radius:50%;
+                   background:var(--dot,var(--dim)); flex:none; }
+  .s-ok { --dot:var(--ok); } .s-bad { --dot:var(--bad); }
+  .s-warn { --dot:var(--warn); } .s-idle { --dot:var(--dim); }
+  #link { margin-left:auto; color:var(--dim); }
+
+  nav { display:flex; flex-wrap:wrap; padding:0 12px; border-bottom:1px solid var(--line); }
+  nav a { flex:1 1 45%; min-height:52px; display:flex; align-items:center;
+          justify-content:center; padding:0 16px; font-size:14px; font-weight:400;
+          letter-spacing:.08em; text-transform:uppercase; color:var(--dim);
+          text-decoration:none; border-bottom:2px solid transparent; transition:color 150ms; }
+  nav a.on { color:var(--fg); font-weight:600; border-bottom-color:var(--fg); }
+  @media (min-width:600px) { nav { flex-wrap:nowrap; } nav a { flex:1 1 0; } }
+
+  /* One line, always: on a phone the rail scrolls sideways rather than wrapping,
+     so the tabs never get pushed off the first screen. */
+  #rail { position:sticky; top:0; z-index:2; display:flex; overflow-x:auto;
+          padding:8px 12px; background:var(--bg); border-bottom:1px solid var(--line); }
+  #rail .cell { display:flex; flex-direction:column; gap:2px; flex:none;
+                padding:2px 14px; border-left:1px solid var(--line); white-space:nowrap; }
+  #rail .cell:first-child { border-left:0; padding-left:0; }
+  #rail i { font-style:normal; font-size:10px; letter-spacing:.14em;
+            text-transform:uppercase; color:var(--dim); }
+  #rail b { font:400 13px/1.3 var(--mono); }
+  #stale { display:none; padding:8px 12px; border-bottom:1px solid var(--line);
+           font:13px/1.4 var(--mono); color:var(--warn); }
+  #stale.on { display:block; }
+
+  main { padding:22px 12px 48px; }
+  section { display:none; }
+  section.on { display:block; }
+  h2 { margin:0 0 16px; font:600 11px/1 var(--mono); letter-spacing:.18em;
+       text-transform:uppercase; color:var(--dim); }
+  .empty { font:13px/1.6 var(--mono); color:var(--dim); }
+
+  .btn { min-height:48px; padding:0 18px; font-size:15px; font-weight:600; color:var(--fg);
+         background:none; border:1px solid rgba(255,255,255,.25); border-radius:4px;
+         cursor:pointer; transition:background 150ms, border-color 150ms; }
+  .btn:hover:not(:disabled) { background:rgba(255,255,255,.06); }
+  .btn:disabled { opacity:.4; cursor:not-allowed; }
+  .btn.go { background:var(--fg); border-color:var(--fg); color:var(--bg); }
+  .btn.go:hover:not(:disabled) { background:#fff; }
+  .btn.halt { border-color:var(--bad); color:var(--bad); }
+  input, select, textarea { min-height:48px; padding:0 12px; font-size:15px; color:var(--fg);
+                            background:transparent; border:1px solid rgba(255,255,255,.25);
+                            border-radius:4px; }
+  input:focus, select:focus, textarea:focus { outline:none; border-color:var(--fg); }
+  .btn:focus-visible, nav a:focus-visible, input:focus-visible, select:focus-visible,
+  textarea:focus-visible { outline:2px solid #8ab4d8; outline-offset:2px; }
+
+  /* Outcome text appears under the control that caused it — no toasts, no modals. */
+  .res { margin-top:8px; font-size:14px; color:var(--dim); white-space:pre-line; }
+  .res.bad { color:var(--bad); } .res.warn { color:var(--warn); } .res.good { color:var(--ok); }
+
+  @media (prefers-reduced-motion: reduce) { * { transition:none !important; } }
+</style>
+</head>
+<body>
+
+<header>
+  <span class="wordmark">CountKit</span>
+  <span class="state s-idle" id="link">no contact</span>
+</header>
+
+<nav>
+  <a href="#/label">Label</a>
+  <a href="#/analyze">Analyze</a>
+  <a href="#/counts">Counts</a>
+  <a href="#/report">Report</a>
+</nav>
+
+<div id="rail">
+  <span class="cell"><i>host</i><b id="r-host">…</b></span>
+  <span class="cell"><i>ingest disk free</i><b id="r-disk">…</b></span>
+  <span class="cell"><i>gpu</i><b id="r-gpu">—</b></span>
+  <span class="cell"><i>job</i><b id="r-job">—</b></span>
+  <span class="cell"><i>clock</i><b id="r-clock">—</b></span>
+</div>
+<div id="stale"></div>
+
+<main>
+  <section id="label">
+    <h2>Label — gate calibration</h2>
+    <p class="empty">no calibrations yet · pick a site and camera to draw entry and exit gates</p>
+  </section>
+  <section id="analyze">
+    <h2>Analyze — job queue</h2>
+    <p class="empty">no jobs queued · verified site-days from the ingest tree appear here</p>
+  </section>
+  <section id="counts">
+    <h2>Counts — aggregation &amp; QA</h2>
+    <p class="empty">no analyzed site-days yet · run a job in Analyze first</p>
+  </section>
+  <section id="report">
+    <h2>Report — deliverable</h2>
+    <p class="empty">nothing to export yet · counts must exist before a report can be built</p>
+  </section>
+</main>
+
+<script>
+const TABS = ['label', 'analyze', 'counts', 'report'];
+const $ = id => document.getElementById(id);
+
+function route() {
+  const tab = TABS.includes(location.hash.slice(2)) ? location.hash.slice(2) : TABS[0];
+  document.querySelectorAll('nav a').forEach(a => a.classList.toggle('on', a.hash === '#/' + tab));
+  document.querySelectorAll('section').forEach(s => s.classList.toggle('on', s.id === tab));
+}
+addEventListener('hashchange', route);
+route();
+
+// The clock is local to the site, not to the laptop: an operator reviewing from
+// another timezone still reads Africa/Lusaka, which is what every bin is stamped in.
+const CAT = new Intl.DateTimeFormat('en-GB', {
+  timeZone: 'Africa/Lusaka', hour12: false,
+  hour: '2-digit', minute: '2-digit', second: '2-digit' });
+setInterval(() => { $('r-clock').textContent = CAT.format(new Date()) + ' CAT'; }, 1000);
+
+let lastOk = '';
+async function refreshStatus() {
+  try {
+    const s = await (await fetch('/api/status')).json();
+    $('r-host').textContent = s.hostname;
+    $('r-disk').textContent = s.disk_free_gb + ' GB';
+    $('r-gpu').textContent = s.gpu && s.gpu.temp_c != null ? s.gpu.temp_c + ' °C' : '—';
+    $('r-job').textContent = s.active_job || '—';
+    lastOk = CAT.format(new Date());
+    $('link').textContent = 'link ok';
+    $('link').className = 'state s-ok';
+    $('stale').className = '';
+  } catch (e) {
+    // A dropped field network is not a failed job: say so, and keep the last numbers
+    // on screen rather than blanking them out.
+    $('link').textContent = 'no contact';
+    $('link').className = 'state s-warn';
+    $('stale').textContent = '● showing last known state · ' + (lastOk || 'never connected')
+                           + ' · running jobs are unaffected';
+    $('stale').className = 'on';
+  }
+}
+refreshStatus();
+setInterval(refreshStatus, 5000);
+</script>
+</body>
+</html>

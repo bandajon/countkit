@@ -1,0 +1,62 @@
+# CountKit configuration. Copied to config.yaml on first boot; edit that copy
+# (in the UI or by hand) — this file stays as the reference.
+
+# Verified footage from FieldKit's nvr_pull: <ingest_root>/<date>/<site>/<cam>/*.mkv
+# On the Jetson this is /data/ingest.
+ingest_root: ./ingest
+
+# CountKit's own state: SQLite event DBs, calibrations, evidence crops, reports.
+data_root: ./data
+
+# UTC+2, no DST. All bins are clock quarters in this zone.
+site_tz: Africa/Lusaka
+
+# Model label -> report class. The detector's taxonomy changes (TrafficCamNet now,
+# a fine-tuned model later); this table absorbs that without a code change.
+classes:
+  - {model: car, report: car}
+  - {model: minibus, report: minibus}
+  - {model: bus, report: bus}
+  - {model: truck, report: light_truck}
+  - {model: heavy_truck, report: heavy_truck}
+  - {model: motorcycle, report: motorcycle}
+  - {model: bicycle, report: bicycle}
+
+# Passenger-car-unit factors per report class, applied only when the PCU toggle is on.
+pcu:
+  car: 1.0
+  minibus: 1.5
+  bus: 2.5
+  light_truck: 1.5
+  heavy_truck: 2.5
+  motorcycle: 0.5
+  bicycle: 0.5
+
+# DeepStream nvinfer config file. The model is configuration, not code — the same
+# CountKit runs on the RTX rig by pointing this elsewhere. Empty = mock detector.
+nvinfer_config: ""
+
+# Licensed floating-car dataset for corroboration only (never a second count).
+# provider e.g. tomtom; dataset is a path under data_root. Empty = no probe UI anywhere.
+probe:
+  provider: ""
+  dataset: ""
+
+# Cloudflare R2 offload for evidence crops. Credentials live here, never in the UI.
+# Local copies are deleted only after a verified upload and only under disk pressure.
+r2:
+  enabled: false
+  account_id: ""
+  access_key_id: ""
+  secret_access_key: ""
+  bucket: countkit-crops
+  cdn_base: ""
+
+# Live, attributed, unstored sanity glance only — Google data is never stored.
+google_routes:
+  api_key: ""
+
+# Stamped on Excel/PDF deliverables. logo_path is relative to data_root.
+branding:
+  company_name: Dexterity
+  logo_path: ""

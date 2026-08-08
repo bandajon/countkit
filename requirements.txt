@@ -1,0 +1,8 @@
+# pyds / DeepStream come from the Jetson JetPack image — never pip-installed here.
+# boto3 is optional: only needed when r2.enabled is true.
+fastapi
+uvicorn
+pyyaml
+requests
+openpyxl
+reportlab
