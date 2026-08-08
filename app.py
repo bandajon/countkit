@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """CountKit — junction analysis & reporting console. Run: python app.py"""
 
+import json
 import os
+import queue
 import re
 import shutil
 import socket
@@ -11,10 +13,11 @@ from pathlib import Path
 import uvicorn
 import yaml
 from fastapi import Body, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 import calib
+import engine
 
 PKG = Path(__file__).resolve().parent
 # Everything the operator owns (config.yaml, ./data, ./ingest) hangs off ROOT; the
@@ -99,6 +102,37 @@ if not CONFIG_PATH.exists():      # first boot
 load_config()
 calib.DATA_ROOT = data_root()
 
+SUBSCRIBERS = []     # one queue.Queue per open SSE client
+
+
+def detector():
+    """The model is config, not code: an nvinfer config selects the real pipeline,
+    its absence replays fixtures. Same engine either way."""
+    cfg = CONFIG.get("nvinfer_config") or ""
+    if not cfg:
+        return engine.mock_factory(ROOT / "fixtures")
+    import deepstream_runner
+    return deepstream_runner.factory(ingest_root(), cfg)
+
+
+def run_job(site, date, say, cancelled):
+    return engine.analyze(site, date, ingest_root(), data_root(), detector(),
+                          progress=say, cancelled=cancelled)
+
+
+def jobs_changed():
+    # Serialise now, not at yield time: the job dicts keep mutating, so a queued
+    # reference would deliver the newest state under an older frame's timestamp.
+    frame = json.dumps(JOBS.list())
+    for q in list(SUBSCRIBERS):
+        try:
+            q.put_nowait(frame)
+        except queue.Full:
+            pass     # a stalled client must never slow the analysis down
+
+
+JOBS = engine.Jobs(data_root(), run_job, jobs_changed)
+
 app = FastAPI(title="CountKit")
 app.mount("/static", StaticFiles(directory=PKG / "static"), name="static")
 
@@ -115,7 +149,8 @@ def status():
         "ips": local_ips(),
         "disk_free_gb": round(shutil.disk_usage(data_root()).free / 1e9, 1),
         "gpu": {"temp_c": gpu_temp_c()},
-        "active_job": None,       # the Analyze queue fills this in
+        "active_job": next((f"{j['site']} {j['date']}" for j in JOBS.list()
+                            if j["state"] == "RUNNING"), None),
         "time": datetime.now().isoformat(timespec="seconds"),
     }
 
@@ -217,6 +252,67 @@ def frame_get(site: str, cam: str):
 @app.post("/api/frame/{site}/{cam}")
 async def frame_post(site: str, cam: str, request: Request):
     return _calib(calib.save_reference, site, cam, await request.body())
+
+
+@app.get("/api/analyze/jobs")
+def analyze_jobs():
+    return JOBS.list()
+
+
+@app.post("/api/analyze/queue")
+def analyze_queue(body: dict = Body(default={})):
+    site, date = body.get("site") or "", body.get("date") or ""
+    try:
+        engine.check_ready(ingest_root(), date, site)   # .verified + every clock offset
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return JOBS.add(site, date)
+
+
+@app.post("/api/analyze/cancel")
+def analyze_cancel(body: dict = Body(default={})):
+    return {"ok": JOBS.cancel(body.get("job_id"))}
+
+
+@app.post("/api/analyze/retry")
+def analyze_retry(body: dict = Body(default={})):
+    return {"ok": JOBS.retry(body.get("job_id"))}
+
+
+@app.get("/api/analyze/status/{site}/{date}")
+def analyze_status(site: str, date: str):
+    """Whether this site-day is queueable, already analyzed, or blocked — with the
+    blocking copy the row shows verbatim."""
+    try:
+        engine.check_ready(ingest_root(), date, site)
+        blocked = ""
+    except ValueError as e:
+        blocked = str(e)
+    db = engine.connect(data_root(), site)
+    n = db.execute("SELECT COUNT(*) FROM events WHERE site=? AND date=?",
+                   (site, date)).fetchone()[0]
+    db.close()
+    return {"blocked": blocked, "events": n}
+
+
+@app.get("/api/analyze/stream")
+def analyze_stream():
+    q = queue.Queue(maxsize=100)
+    SUBSCRIBERS.append(q)
+
+    def gen():
+        try:
+            yield f"data: {json.dumps(JOBS.list())}\n\n"     # current truth first
+            while True:
+                try:
+                    yield f"data: {q.get(timeout=15)}\n\n"
+                except queue.Empty:
+                    yield ": ping\n\n"    # keep idle proxies from closing the stream
+        finally:
+            if q in SUBSCRIBERS:
+                SUBSCRIBERS.remove(q)
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
 
 
 if __name__ == "__main__":

@@ -125,6 +125,17 @@
   #viewbanner { display:none; margin-bottom:12px; color:var(--warn); font:13px/1.4 var(--mono); }
   #viewbanner.on { display:block; }
 
+  /* --- Analyze tab --- */
+  .bar { height:4px; margin:12px 0 6px; background:rgba(255,255,255,.10);
+         border-radius:2px; overflow:hidden; }
+  .bar > div { height:100%; background:var(--fg); }
+  .well { max-height:200px; overflow:auto; margin-top:8px; padding:12px;
+          background:var(--well); border:1px solid var(--line); border-radius:4px;
+          white-space:pre-wrap; font:13px/1.5 var(--mono); color:var(--dim); }
+  summary { cursor:pointer; padding:12px 0 0; font:600 11px/1 var(--mono);
+            letter-spacing:.18em; text-transform:uppercase; color:var(--dim); }
+  summary:hover { color:var(--fg); }
+
   @media (prefers-reduced-motion: reduce) { * { transition:none !important; } }
 </style>
 </head>
@@ -225,8 +236,12 @@
     </div>
   </section>
   <section id="analyze">
-    <h2>Analyze — job queue</h2>
-    <p class="empty">no jobs queued · verified site-days from the ingest tree appear here</p>
+    <div class="panel">
+      <div class="eyebrow" style="margin-bottom:10px">site-days</div>
+      <div id="daylist"><p class="empty">reading the ingest tree…</p></div>
+    </div>
+    <div class="eyebrow" style="margin:18px 0 10px">queue</div>
+    <div id="joblist"><p class="empty">no jobs yet · queue a verified site-day above</p></div>
   </section>
   <section id="counts">
     <h2>Counts — aggregation &amp; QA</h2>
@@ -581,7 +596,7 @@ function gatelist() {
   $('k-exit').classList.toggle('on', ln.kind === 'exit');
   $('p-name').value = ln.name || '';
   $('p-compass').value = ln.compass || '';
-  $('p-dir').textContent = `dir ${ln.dir} · chevrons point to the side that counts as IN`;
+  $('p-dir').textContent = `dir ${ln.dir} · chevron points the way counted traffic travels`;
 }
 
 $('m-draw').onclick = () => { LAB.mode = 'draw'; $('m-draw').classList.add('on'); $('m-pan').classList.remove('on'); };
@@ -764,6 +779,121 @@ function renderArmmap(m) {
 }
 
 labInit();   // the ResizeObserver above already covers window resizes
+
+// ---------------- Analyze tab: site-day browser + job queue ----------------
+const post = (url, body) => fetch(url, {method: 'POST',
+  headers: {'content-type': 'application/json'}, body: JSON.stringify(body)});
+
+async function days() {
+  const rows = await (await fetch('/api/ingest')).json();
+  const box = $('daylist');
+  if (!rows.length) {
+    box.innerHTML = '<p class="empty">nothing in the ingest tree yet</p>'; return;
+  }
+  box.innerHTML = '';
+  for (const r of rows) {
+    const st = await (await fetch(`/api/analyze/status/${r.site}/${r.date}`)).json();
+    const d = document.createElement('div');
+    d.className = 'armrow';
+    const dot = st.blocked ? 's-bad' : st.events ? 's-ok' : 's-ok';
+    const word = st.blocked ? 'blocked' : st.events ? 'analyzed' : 'verified';
+    d.innerHTML = `<span class="state ${dot}">${word}</span>`
+      + `<span>${r.date} · ${r.site}</span>`
+      + `<span class="who">${r.cams.join(' ')}`
+      + `${st.events ? ' · ' + st.events + ' events' : ''}</span>`;
+    const b = document.createElement('button');
+    b.className = 'btn'; b.style.marginLeft = 'auto';
+    b.textContent = st.events ? 'Re-run' : 'Queue';
+    b.disabled = !!st.blocked;
+    b.onclick = async () => {
+      const r2 = await post('/api/analyze/queue', {site: r.site, date: r.date});
+      if (!r2.ok) { d.querySelector('.say').textContent = (await r2.json()).detail; }
+      jobsPoll();
+    };
+    d.appendChild(b);
+    // The blocking copy is the fix instruction — show it in full, never truncated.
+    const say = document.createElement('span');
+    say.className = 'say bad'; say.textContent = st.blocked;
+    d.appendChild(say);
+    box.appendChild(d);
+  }
+}
+
+function jobCard(j) {
+  const p = j.progress || {}, r = j.result || {};
+  const dot = {QUEUED: 's-idle', RUNNING: 's-warn', DONE: 's-ok',
+               FAILED: 's-bad', CANCELLED: 's-idle'}[j.state];
+  const d = document.createElement('div');
+  d.className = 'panel';
+  let body = '';
+  if (j.state === 'RUNNING') {
+    body = `<div class="bar"><div style="width:${p.pct || 0}%"></div></div>`
+      + `<div class="res mono">segment ${p.i || 0}/${p.n || '?'} · ${p.cam || '—'}`
+      + ` · ${p.pct || 0}% · events ${p.events || 0}</div>`;
+  } else if (j.state === 'DONE') {
+    body = `<div class="res good">${r.events || 0} events · ${r.crops || 0} crops`
+      + `${r.dropped ? ' · ' + r.dropped + ' dropped' : ''}</div>`
+      + `<a class="btn" href="#/counts" style="margin-top:8px">Review counts →</a>`;
+  } else if (j.state === 'FAILED') {
+    body = `<div class="res bad">${(j.log || []).slice(-5).join('\n')}</div>`
+      + `<div class="res">attempt ${j.attempts}</div>`;
+  }
+  d.innerHTML = `<div class="row"><span class="state ${dot}">${j.state}`
+    + `${j.state === 'QUEUED' ? ' #' + j.queuePos : ''}</span>`
+    + `<span class="grow mono">${j.site} · ${j.date}</span></div>${body}`
+    + `<details><summary>log</summary><div class="well">`
+    + `${(j.log || []).join('\n') || 'nothing logged yet'}</div></details>`;
+  const acts = document.createElement('div');
+  acts.className = 'row'; acts.style.marginTop = '8px';
+  if (j.state === 'RUNNING' || j.state === 'QUEUED') {
+    const c = document.createElement('button');
+    c.className = 'btn halt'; c.textContent = 'Cancel';
+    c.onclick = () => post('/api/analyze/cancel', {job_id: j.id}).then(jobsPoll);
+    acts.appendChild(c);
+  }
+  if (j.state === 'FAILED' || j.state === 'CANCELLED') {
+    const c = document.createElement('button');
+    c.className = 'btn'; c.textContent = 'Retry';
+    c.onclick = () => post('/api/analyze/retry', {job_id: j.id}).then(jobsPoll);
+    acts.appendChild(c);
+  }
+  if (acts.children.length) d.appendChild(acts);
+  return d;
+}
+
+function renderJobs(list) {
+  const box = $('joblist');
+  if (!list.length) {
+    box.innerHTML = '<p class="empty">no jobs yet · queue a verified site-day above</p>';
+    return;
+  }
+  let waiting = 0;
+  list.forEach(j => { if (j.state === 'QUEUED') j.queuePos = ++waiting; });
+  box.innerHTML = '';
+  list.forEach(j => box.appendChild(jobCard(j)));   // newest at the bottom
+}
+
+// Only when SSE is down: a poll issued alongside a live stream can land after a newer
+// push and redraw the queue with staler state.
+async function jobsPoll() {
+  if (es) return;
+  renderJobs(await (await fetch('/api/analyze/jobs')).json());
+}
+
+// SSE carries job state; the poll is the fallback for a dropped field network, and
+// the job itself is unaffected either way.
+let es = null;
+function jobsStream() {
+  if (es) return;
+  es = new EventSource('/api/analyze/stream');
+  es.onmessage = e => renderJobs(JSON.parse(e.data));
+  es.onerror = () => { es.close(); es = null; setTimeout(jobsStream, 5000); };
+}
+
+addEventListener('hashchange', () => { if (location.hash.slice(2) === 'analyze') days(); });
+if (location.hash.slice(2) === 'analyze') days();
+jobsPoll(); jobsStream();
+setInterval(() => { if (!es && location.hash.slice(2) === 'analyze') jobsPoll(); }, 5000);
 </script>
 </body>
 </html>
