@@ -83,6 +83,48 @@
   .res { margin-top:8px; font-size:14px; color:var(--dim); white-space:pre-line; }
   .res.bad { color:var(--bad); } .res.warn { color:var(--warn); } .res.good { color:var(--ok); }
 
+  /* --- Label tab --- */
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:4px;
+           padding:16px; margin-bottom:12px; }
+  .row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+  .row .grow { flex:1 1 160px; min-width:0; }
+  .eyebrow { font:600 11px/1 var(--mono); letter-spacing:.18em; text-transform:uppercase;
+             color:var(--dim); }
+
+  .armrow { display:flex; flex-wrap:wrap; gap:6px 12px; align-items:baseline;
+            padding:8px 0; border-top:1px solid var(--line); font:13px/1.4 var(--mono); }
+  .armrow .who { color:var(--dim); }
+  .armrow .say { flex:1 1 100%; font-size:12px; }
+  .armrow .say.warn { color:var(--warn); } .armrow .say.bad { color:var(--bad); }
+
+  #labwrap { display:flex; flex-wrap:wrap; gap:12px; align-items:flex-start; }
+  #canvascol { flex:1 1 66%; min-width:0; }
+  #canvaswrap { position:relative; background:var(--well); border:1px solid var(--line);
+                border-radius:4px; overflow:hidden; }
+  /* touch-action none: the editor owns one-finger draw and two-finger pinch itself. */
+  #gatecanvas { display:block; width:100%; touch-action:none; }
+  #framemsg { padding:20px; font:13px/1.6 var(--mono); color:var(--dim); }
+  #labside { flex:1 1 30%; min-width:260px; }
+  @media (max-width:900px) {
+    #labside { flex:1 1 100%; }
+    /* Thumb reach on a phone: the drawing controls stay on screen while the canvas scrolls. */
+    #drawbar { position:sticky; bottom:0; z-index:1; background:var(--bg);
+               padding:8px 0; border-top:1px solid var(--line); }
+  }
+  #drawbar .btn, .props .btn { flex:1 1 120px; }
+  .gate { display:flex; align-items:center; gap:9px; width:100%; margin-bottom:6px;
+          padding:10px 12px; min-height:44px; text-align:left; color:var(--fg);
+          background:none; border:1px solid var(--line); border-radius:4px;
+          font:13px/1.3 var(--mono); cursor:pointer; }
+  .gate.on { border-color:var(--fg); }
+  .gate .sw { width:10px; height:10px; border-radius:2px; flex:none; }
+  .gate .kind { color:var(--dim); text-transform:uppercase; letter-spacing:.06em; }
+  .props { display:none; margin-top:12px; padding-top:12px; border-top:1px solid var(--line); }
+  .props.on { display:block; }
+  .toggle .btn.on { background:var(--fg); border-color:var(--fg); color:var(--bg); }
+  #viewbanner { display:none; margin-bottom:12px; color:var(--warn); font:13px/1.4 var(--mono); }
+  #viewbanner.on { display:block; }
+
   @media (prefers-reduced-motion: reduce) { * { transition:none !important; } }
 </style>
 </head>
@@ -111,8 +153,76 @@
 
 <main>
   <section id="label">
-    <h2>Label — gate calibration</h2>
-    <p class="empty">no calibrations yet · pick a site and camera to draw entry and exit gates</p>
+    <div class="panel">
+      <div class="row">
+        <span class="eyebrow grow">arm map</span>
+        <span class="state s-idle" id="armstate">no calibrations</span>
+      </div>
+      <div id="armrows"></div>
+      <div id="armnotes" class="res"></div>
+    </div>
+
+    <div class="panel">
+      <div class="row">
+        <select id="l-site" class="grow" aria-label="site"></select>
+        <select id="l-cam" class="grow" aria-label="camera"></select>
+        <select id="l-ver" class="grow" aria-label="calibration version"></select>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <span class="eyebrow grow" id="l-verinfo">no calibration yet</span>
+        <button class="btn" id="l-activate" hidden>Activate this version</button>
+        <button class="btn go" id="l-save">Save as new version</button>
+      </div>
+      <div id="l-res" class="res"></div>
+    </div>
+
+    <div id="viewbanner"></div>
+
+    <div id="labwrap">
+      <div id="canvascol">
+        <div id="canvaswrap">
+          <canvas id="gatecanvas" width="16" height="9"></canvas>
+          <div id="framemsg" hidden></div>
+        </div>
+        <div class="row" id="drawbar" style="margin-top:10px">
+          <span class="row toggle" style="gap:0">
+            <button class="btn on" id="m-draw" style="border-radius:4px 0 0 4px">Draw</button>
+            <button class="btn" id="m-pan" style="border-radius:0 4px 4px 0">Pan</button>
+          </span>
+          <button class="btn" id="g-entry">+ Entry gate</button>
+          <button class="btn" id="g-exit">+ Exit gate</button>
+          <button class="btn" id="g-undo" disabled>Undo pt</button>
+          <button class="btn" id="g-done" disabled>Done</button>
+          <button class="btn" id="z-out" aria-label="zoom out">−</button>
+          <button class="btn" id="z-in" aria-label="zoom in">+</button>
+          <button class="btn" id="z-fit">Fit</button>
+        </div>
+        <div id="drawhint" class="res">pick a site and camera to start</div>
+      </div>
+
+      <aside id="labside" class="panel">
+        <div class="eyebrow" style="margin-bottom:10px">gates</div>
+        <div id="gatelist"><p class="empty">no gates on this camera yet</p></div>
+        <div class="props" id="props">
+          <div class="row toggle" style="gap:0;margin-bottom:8px">
+            <button class="btn" id="k-entry" style="border-radius:4px 0 0 4px">Entry</button>
+            <button class="btn" id="k-exit" style="border-radius:0 4px 4px 0">Exit</button>
+          </div>
+          <div class="row" style="margin-bottom:8px">
+            <input id="p-name" class="grow" placeholder="arm name e.g. Great East Rd">
+            <select id="p-compass" aria-label="compass tag">
+              <option value="">—</option><option>N</option><option>S</option>
+              <option>E</option><option>W</option>
+            </select>
+          </div>
+          <div class="row">
+            <button class="btn" id="p-flip">Flip direction</button>
+            <button class="btn halt" id="p-del">Delete gate</button>
+          </div>
+          <div class="res" id="p-dir"></div>
+        </div>
+      </aside>
+    </div>
   </section>
   <section id="analyze">
     <h2>Analyze — job queue</h2>
@@ -171,6 +281,489 @@ async function refreshStatus() {
 }
 refreshStatus();
 setInterval(refreshStatus, 5000);
+
+// ---------------- Label tab: gate calibration editor ----------------
+// Points are stored in IMAGE coordinates and converted per paint, so zooming and
+// panning can never drift what gets saved.
+const LAB = {
+  sites: {}, site: '', cam: '',
+  img: null, work: null, view: null, viewing: null,
+  versions: [], sel: -1, draw: null,
+  mode: 'draw', z: 1, ox: 0, oy: 0, dirty: false,
+};
+const CAN = $('gatecanvas');
+const HUE = k => getComputedStyle(document.documentElement).getPropertyValue(k).trim();
+const MONO = '12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+const doc_ = () => LAB.view || LAB.work;
+const ro = () => LAB.view !== null;                      // viewing an older version
+// offsetX/offsetY are relative to whatever box the browser last laid out and go wrong
+// once the page is scrolled; the bounding rect is the only reliable canvas origin.
+const at = e => { const r = CAN.getBoundingClientRect();
+                  return [e.clientX - r.left, e.clientY - r.top]; };
+const i2s = p => [p[0] * LAB.z + LAB.ox, p[1] * LAB.z + LAB.oy];
+const s2i = (x, y) => [(x - LAB.ox) / LAB.z, (y - LAB.oy) / LAB.z];
+const mid = (a, b) => [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+const TOL = () => matchMedia('(pointer: coarse)').matches ? 20 : 12;
+
+function paint() {
+  const dpr = devicePixelRatio || 1, w = CAN.clientWidth, h = CAN.clientHeight;
+  CAN.width = w * dpr; CAN.height = h * dpr;      // also picks up any resize, for free
+  const g = CAN.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+  if (LAB.img) g.drawImage(LAB.img, LAB.ox, LAB.oy,
+                           LAB.img.naturalWidth * LAB.z, LAB.img.naturalHeight * LAB.z);
+  const d = doc_();
+  if (d) d.lines.forEach((ln, i) => gate(g, ln, i === LAB.sel && !ro()));
+  if (LAB.draw) pending(g);
+}
+
+function gate(g, ln, on) {
+  const hue = ln.kind === 'entry' ? HUE('--entry') : HUE('--exit');
+  const pts = ln.points.map(i2s);
+  g.lineJoin = g.lineCap = 'round';
+  g.strokeStyle = hue; g.lineWidth = on ? 5 : 3.5;
+  g.beginPath(); pts.forEach((p, i) => i ? g.lineTo(p[0], p[1]) : g.moveTo(p[0], p[1]));
+  g.stroke();
+  for (let i = 1; i < pts.length; i++) chevron(g, pts[i - 1], pts[i], ln.dir, hue);
+  if (on) {
+    pts.forEach(p => dot(g, p, hue, 11));
+    for (let i = 1; i < pts.length; i++) plus(g, mid(pts[i - 1], pts[i]), hue);
+  }
+  chip(g, pts, ln, hue);
+}
+
+// Convention (kept in step with the FLIP button): dir 'AB' means the side that counts
+// as crossing IN is the LEFT of travel from the first point to the last. Screen y grows
+// downward, so left of (dx,dy) is (dy,-dx). 'BA' is the same line walked backwards.
+function chevron(g, a, b, dir, hue) {
+  const dx = b[0] - a[0], dy = b[1] - a[1], L = Math.hypot(dx, dy) || 1;
+  const s = dir === 'AB' ? 1 : -1;
+  const nx = s * dy / L, ny = -s * dx / L, tx = dx / L, ty = dy / L;
+  const m = mid(a, b), tip = [m[0] + nx * 18, m[1] + ny * 18];
+  g.strokeStyle = hue; g.lineWidth = 2.5; g.beginPath();
+  g.moveTo(tip[0] - nx * 9 - tx * 7, tip[1] - ny * 9 - ty * 7);
+  g.lineTo(tip[0], tip[1]);
+  g.lineTo(tip[0] - nx * 9 + tx * 7, tip[1] - ny * 9 + ty * 7);
+  g.stroke();
+}
+
+function dot(g, p, hue, r) {
+  g.beginPath(); g.arc(p[0], p[1], r, 0, 7);
+  g.fillStyle = '#0b0e10'; g.fill();
+  g.strokeStyle = hue; g.lineWidth = 2; g.stroke();
+}
+
+function plus(g, m, hue) {
+  g.strokeStyle = hue; g.lineWidth = 2; g.beginPath();
+  g.moveTo(m[0] - 5, m[1]); g.lineTo(m[0] + 5, m[1]);
+  g.moveTo(m[0], m[1] - 5); g.lineTo(m[0], m[1] + 5); g.stroke();
+}
+
+function chip(g, pts, ln, hue) {
+  const i = Math.max(1, Math.floor(pts.length / 2)), m = mid(pts[i - 1], pts[i]);
+  const t = (ln.name || 'unnamed') + (ln.compass ? ' (' + ln.compass + ')' : '');
+  g.font = MONO;
+  const w = g.measureText(t).width + 12, x = m[0] - w / 2, y = m[1] - 26;
+  g.fillStyle = '#0b0e10'; g.fillRect(x, y, w, 19);
+  g.strokeStyle = hue; g.lineWidth = 1; g.strokeRect(x, y, w, 19);
+  g.fillStyle = hue; g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillText(t, m[0], y + 10);
+  g.textAlign = 'start'; g.textBaseline = 'alphabetic';
+}
+
+function pending(g) {
+  const hue = LAB.draw.kind === 'entry' ? HUE('--entry') : HUE('--exit');
+  const pts = LAB.draw.points.map(i2s);
+  g.strokeStyle = hue; g.lineWidth = 3.5; g.setLineDash([]);
+  if (pts.length > 1) {
+    g.beginPath(); pts.forEach((p, i) => i ? g.lineTo(p[0], p[1]) : g.moveTo(p[0], p[1]));
+    g.stroke();
+  }
+  if (pts.length && LAB.draw.hover) {          // dashed rubber band to the pointer
+    g.setLineDash([6, 5]); g.beginPath();
+    g.moveTo(pts[pts.length - 1][0], pts[pts.length - 1][1]);
+    g.lineTo(LAB.draw.hover[0], LAB.draw.hover[1]); g.stroke(); g.setLineDash([]);
+  }
+  pts.forEach(p => dot(g, p, hue, 6));
+}
+
+function distSeg(p, a, b) {
+  const dx = b[0] - a[0], dy = b[1] - a[1], L2 = dx * dx + dy * dy;
+  const t = L2 ? Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / L2)) : 0;
+  return Math.hypot(p[0] - (a[0] + t * dx), p[1] - (a[1] + t * dy));
+}
+
+function hitGate(x, y) {
+  const d = doc_(); let best = -1, bd = TOL();
+  (d ? d.lines : []).forEach((ln, i) => {
+    const pts = ln.points.map(i2s);
+    for (let k = 1; k < pts.length; k++) {
+      const dist = distSeg([x, y], pts[k - 1], pts[k]);
+      if (dist < bd) { bd = dist; best = i; }
+    }
+  });
+  return best;
+}
+
+function hitVertex(x, y) {
+  if (LAB.sel < 0) return -1;
+  const pts = doc_().lines[LAB.sel].points.map(i2s);
+  for (let i = 0; i < pts.length; i++)
+    if (Math.hypot(x - pts[i][0], y - pts[i][1]) <= 22) return i;   // 44px hit area
+  return -1;
+}
+
+function hitPlus(x, y) {
+  if (LAB.sel < 0) return -1;
+  const pts = doc_().lines[LAB.sel].points.map(i2s);
+  for (let i = 1; i < pts.length; i++) {
+    const m = mid(pts[i - 1], pts[i]);
+    if (Math.hypot(x - m[0], y - m[1]) <= 16) return i;
+  }
+  return -1;
+}
+
+// ---- pointer input: one finger acts in the current mode, two always pan/zoom ----
+const ptrs = new Map();
+let down = null, pinch = null;
+
+function zoomAt(x, y, f) {
+  const [ix, iy] = s2i(x, y);
+  LAB.z = Math.min(8, Math.max(0.05, LAB.z * f));
+  LAB.ox = x - ix * LAB.z; LAB.oy = y - iy * LAB.z;
+  LAB.moved = true; paint();
+}
+
+function fit() {
+  if (!LAB.img) return;
+  const w = $('canvaswrap').clientWidth;
+  CAN.style.height = Math.round(w * LAB.img.naturalHeight / LAB.img.naturalWidth) + 'px';
+  LAB.z = w / LAB.img.naturalWidth; LAB.ox = LAB.oy = 0; LAB.moved = false;
+  paint();
+}
+
+// The canvas is laid out before the frame arrives, so fitting once during load races the
+// reflow. Refit on every width change until the operator zooms or pans, then leave it be.
+let lastW = 0;
+new ResizeObserver(() => {
+  const w = $('canvaswrap').clientWidth;
+  if (w === lastW) return;                     // our own height write must not re-trigger
+  lastW = w;
+  LAB.moved ? paint() : fit();
+}).observe($('canvaswrap'));
+
+CAN.onpointerdown = e => {
+  const [x, y] = at(e);
+  // Throws if the pointer is already gone; capture is an optimisation, not the mechanism.
+  try { CAN.setPointerCapture(e.pointerId); } catch (err) { /* keep drawing */ }
+  ptrs.set(e.pointerId, [x, y]);
+  if (ptrs.size > 1) { down = null; pinch = null; return; }
+  down = { x, y, moved: false, drag: -1 };
+  if (!ro() && LAB.mode === 'draw' && !LAB.draw) down.drag = hitVertex(x, y);
+};
+
+CAN.onpointermove = e => {
+  const [ex, ey] = at(e);
+  if (ptrs.has(e.pointerId)) ptrs.set(e.pointerId, [ex, ey]);
+  if (ptrs.size > 1) {
+    const [a, b] = [...ptrs.values()];
+    const d = Math.hypot(a[0] - b[0], a[1] - b[1]), m = mid(a, b);
+    if (pinch) {
+      LAB.ox += m[0] - pinch.m[0]; LAB.oy += m[1] - pinch.m[1];
+      zoomAt(m[0], m[1], d / (pinch.d || d));
+    }
+    pinch = { d, m };
+    return;
+  }
+  if (LAB.draw && LAB.draw.points.length && !down) {
+    LAB.draw.hover = [ex, ey]; paint(); return;
+  }
+  if (!down) return;
+  if (Math.hypot(ex - down.x, ey - down.y) > 6) down.moved = true;
+  if (down.drag >= 0) {
+    doc_().lines[LAB.sel].points[down.drag] = s2i(ex, ey).map(Math.round);
+    touch(); paint();
+  } else if (down.moved && (LAB.mode === 'pan' || ro())) {
+    LAB.ox += ex - down.x; LAB.oy += ey - down.y;
+    down.x = ex; down.y = ey; LAB.moved = true; paint();
+  }
+};
+
+CAN.onpointerup = CAN.onpointercancel = e => {
+  ptrs.delete(e.pointerId);
+  if (ptrs.size < 2) pinch = null;
+  const d = down; down = null;
+  if (!d || d.moved || d.drag >= 0 || ro() || LAB.mode !== 'draw') return;
+  if (LAB.draw) {                                   // placing vertices
+    LAB.draw.points.push(s2i(d.x, d.y).map(Math.round));
+    LAB.draw.hover = null; drawbar(); paint(); return;
+  }
+  const at = hitPlus(d.x, d.y);
+  if (at > 0) {                                     // '+' inserts a vertex mid-segment
+    const pts = doc_().lines[LAB.sel].points;
+    pts.splice(at, 0, s2i(d.x, d.y).map(Math.round));
+    touch(); paint(); return;
+  }
+  select(hitGate(d.x, d.y));
+};
+
+// Trackpad pinch arrives as a ctrlKey wheel. A plain wheel must stay page scroll — the
+// panels above the canvas are otherwise unreachable once the pointer is over the frame.
+CAN.onwheel = e => {
+  if (!e.ctrlKey && !e.metaKey) return;
+  e.preventDefault();
+  const [x, y] = at(e);
+  zoomAt(x, y, e.deltaY < 0 ? 1.12 : 1 / 1.12);
+};
+CAN.ondblclick = () => finish();
+addEventListener('keydown', e => {
+  // Same default as route(): an empty hash IS the Label tab.
+  const tab = TABS.includes(location.hash.slice(2)) ? location.hash.slice(2) : TABS[0];
+  if (tab !== 'label' || !LAB.draw) return;
+  if (e.key === 'Escape') { LAB.draw = null; drawbar(); paint(); }
+  if (e.key === 'Enter') finish();
+});
+
+// ---- editing ----
+function touch() { LAB.dirty = true; $('l-res').textContent = ''; drawbar(); }
+
+function begin(kind) {
+  if (ro()) return;
+  LAB.draw = { kind, points: [], hover: null };
+  select(-1); drawbar(); paint();
+}
+
+function finish() {
+  if (!LAB.draw || LAB.draw.points.length < 2) return;
+  LAB.work.lines.push({ kind: LAB.draw.kind, name: '', compass: '',
+                        points: LAB.draw.points, dir: 'AB' });
+  LAB.draw = null;
+  select(LAB.work.lines.length - 1);
+  touch(); paint();
+}
+
+function select(i) { LAB.sel = i; gatelist(); paint(); }
+
+function drawbar() {
+  const n = LAB.draw ? LAB.draw.points.length : 0;
+  $('g-undo').disabled = !n;
+  $('g-done').disabled = n < 2;
+  $('g-entry').disabled = $('g-exit').disabled = !!LAB.draw || ro() || !LAB.work;
+  $('drawhint').textContent = LAB.draw
+    ? `drawing ${LAB.draw.kind} gate · ${n} point${n === 1 ? '' : 's'} · Done needs 2+ · Esc cancels`
+    : 'tap a gate to select · pinch, ctrl+wheel or the zoom buttons to magnify';
+  $('l-res').classList.toggle('warn', LAB.dirty);
+  if (LAB.dirty && !$('l-res').textContent) $('l-res').textContent = 'unsaved changes';
+}
+
+function gatelist() {
+  const d = doc_(), box = $('gatelist');
+  if (!d || !d.lines.length) {
+    box.innerHTML = '<p class="empty">no gates on this camera yet</p>';
+    $('props').className = 'props'; return;
+  }
+  box.innerHTML = '';
+  d.lines.forEach((ln, i) => {
+    const b = document.createElement('button');
+    b.className = 'gate' + (i === LAB.sel ? ' on' : '');
+    b.innerHTML = `<span class="sw"></span><span class="kind">${ln.kind}</span>`
+                + `<span>${(ln.name || 'unnamed').replace(/</g, '&lt;')}`
+                + `${ln.compass ? ' (' + ln.compass + ')' : ''}</span>`;
+    b.querySelector('.sw').style.background = ln.kind === 'entry' ? 'var(--entry)' : 'var(--exit)';
+    b.onclick = () => select(i);
+    box.appendChild(b);
+  });
+  const ln = d.lines[LAB.sel];
+  $('props').className = 'props' + (ln && !ro() ? ' on' : '');
+  if (!ln) return;
+  $('k-entry').classList.toggle('on', ln.kind === 'entry');
+  $('k-exit').classList.toggle('on', ln.kind === 'exit');
+  $('p-name').value = ln.name || '';
+  $('p-compass').value = ln.compass || '';
+  $('p-dir').textContent = `dir ${ln.dir} · chevrons point to the side that counts as IN`;
+}
+
+$('m-draw').onclick = () => { LAB.mode = 'draw'; $('m-draw').classList.add('on'); $('m-pan').classList.remove('on'); };
+$('m-pan').onclick = () => { LAB.mode = 'pan'; LAB.draw = null; $('m-pan').classList.add('on'); $('m-draw').classList.remove('on'); drawbar(); paint(); };
+$('g-entry').onclick = () => begin('entry');
+$('g-exit').onclick = () => begin('exit');
+$('g-undo').onclick = () => { if (LAB.draw) { LAB.draw.points.pop(); drawbar(); paint(); } };
+$('g-done').onclick = () => finish();
+const zc = f => zoomAt(CAN.clientWidth / 2, CAN.clientHeight / 2, f);   // zoom about the middle
+$('z-in').onclick = () => zc(1.25);
+$('z-out').onclick = () => zc(1 / 1.25);
+$('z-fit').onclick = () => fit();
+$('k-entry').onclick = () => { doc_().lines[LAB.sel].kind = 'entry'; touch(); gatelist(); paint(); };
+$('k-exit').onclick = () => { doc_().lines[LAB.sel].kind = 'exit'; touch(); gatelist(); paint(); };
+$('p-name').oninput = () => { doc_().lines[LAB.sel].name = $('p-name').value; touch(); paint(); };
+$('p-compass').onchange = () => { doc_().lines[LAB.sel].compass = $('p-compass').value; touch(); paint(); };
+$('p-flip').onclick = () => {
+  const ln = doc_().lines[LAB.sel];
+  ln.dir = ln.dir === 'AB' ? 'BA' : 'AB';
+  touch(); gatelist(); paint();
+};
+$('p-del').onclick = () => {
+  const ln = doc_().lines[LAB.sel];
+  if (!confirm(`Delete the ${ln.kind} gate "${ln.name || 'unnamed'}"?`)) return;
+  doc_().lines.splice(LAB.sel, 1);
+  touch(); select(-1);
+};
+
+// ---- loading ----
+const detail = async r => { try { return (await r.json()).detail; } catch (e) { return r.statusText; } };
+const keep = () => !LAB.dirty || confirm('Discard unsaved gate changes?');
+
+async function labInit() {
+  const rows = await (await fetch('/api/ingest')).json().catch(() => []);
+  LAB.sites = {};
+  rows.forEach(r => { (LAB.sites[r.site] = LAB.sites[r.site] || new Set()); r.cams.forEach(c => LAB.sites[r.site].add(c)); });
+  const sites = Object.keys(LAB.sites).sort();
+  $('l-site').innerHTML = sites.map(s => `<option>${s}</option>`).join('')
+                       || '<option value="">no footage in the ingest tree yet</option>';
+  LAB.site = sites[0] || '';
+  await siteChanged();
+}
+
+async function siteChanged() {
+  LAB.site = $('l-site').value || LAB.site;
+  const cams = [...(LAB.sites[LAB.site] || [])].sort();
+  $('l-cam').innerHTML = cams.map(c => `<option>${c}</option>`).join('') || '<option value="">—</option>';
+  LAB.cam = cams[0] || '';
+  await armmap();
+  await camChanged();
+}
+
+async function camChanged() {
+  LAB.cam = $('l-cam').value || LAB.cam;
+  LAB.work = LAB.view = LAB.viewing = null;
+  LAB.sel = -1; LAB.draw = null; LAB.dirty = false;
+  $('l-res').textContent = ''; $('viewbanner').className = ''; $('l-activate').hidden = true;
+  if (!LAB.site || !LAB.cam) { $('framemsg').hidden = false; $('framemsg').textContent =
+    'no cameras yet — pull footage with FieldKit first'; return; }
+  await frame();
+  await calibration();
+  await versions();
+  drawbar(); gatelist(); paint();
+}
+
+async function frame() {
+  const wrap = $('canvaswrap'), msg = $('framemsg');
+  LAB.img = null; msg.hidden = true; CAN.hidden = false;
+  const r = await fetch(`/api/frame/${LAB.site}/${LAB.cam}`);
+  if (!r.ok) {
+    CAN.hidden = true; msg.hidden = false;
+    msg.textContent = await detail(r);
+    const lab = document.createElement('label');
+    lab.style.cssText = 'display:block;margin-top:14px';
+    lab.textContent = 'Upload reference photo (JPEG) ';
+    const f = document.createElement('input');
+    f.type = 'file'; f.accept = 'image/jpeg';
+    f.onchange = async () => {
+      const up = await fetch(`/api/frame/${LAB.site}/${LAB.cam}`,
+                             { method: 'POST', body: f.files[0] });
+      if (!up.ok) { msg.textContent = await detail(up); return; }
+      await camChanged();
+    };
+    lab.appendChild(f); msg.appendChild(lab);
+    return;
+  }
+  const img = new Image();
+  img.src = URL.createObjectURL(await r.blob());
+  await img.decode();
+  URL.revokeObjectURL(img.src);   // decoded bitmap survives; the blob need not
+  LAB.img = img;
+  CAN.style.height = Math.round(wrap.clientWidth * img.naturalHeight / img.naturalWidth) + 'px';
+  LAB.z = wrap.clientWidth / img.naturalWidth; LAB.ox = LAB.oy = 0;   // fit to view
+}
+
+async function calibration() {
+  const r = await fetch(`/api/calib/${LAB.site}/${LAB.cam}`);
+  const size = LAB.img ? [LAB.img.naturalWidth, LAB.img.naturalHeight] : [1920, 1080];
+  LAB.work = r.ok ? await r.json() : { image_size: size, lines: [] };
+}
+
+async function versions() {
+  LAB.versions = await (await fetch(`/api/calib/${LAB.site}/${LAB.cam}/versions`)).json();
+  const act = LAB.versions.find(v => v.active);
+  $('l-ver').innerHTML = '<option value="">working copy (active)</option>'
+    + LAB.versions.map(v => `<option value="${v.version}">v${v.version}${v.active ? ' · active' : ''}</option>`).join('');
+  $('l-ver').value = '';
+  $('l-verinfo').textContent = act
+    ? `calibration v${act.version} · active · saved ${act.saved.replace('T', ' ')}`
+    : 'no calibration yet';
+}
+
+$('l-ver').onchange = async () => {
+  const v = $('l-ver').value;
+  if (!v) { LAB.view = LAB.viewing = null; $('viewbanner').className = ''; $('l-activate').hidden = true; }
+  else {
+    LAB.viewing = +v;
+    LAB.view = await (await fetch(`/api/calib/${LAB.site}/${LAB.cam}?version=${v}`)).json();
+    $('viewbanner').textContent = `viewing v${v} — read-only. Activate it to make it the one`
+      + ' analysis uses, or switch back to the working copy to keep editing.';
+    $('viewbanner').className = 'on';
+    $('l-activate').hidden = false;
+  }
+  LAB.sel = -1; LAB.draw = null; drawbar(); gatelist(); paint();
+};
+
+$('l-activate').onclick = async () => {
+  const r = await fetch(`/api/calib/${LAB.site}/${LAB.cam}/activate`,
+    { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ version: LAB.viewing }) });
+  $('l-res').textContent = r.ok ? `v${LAB.viewing} is now the active calibration`
+                                : await detail(r);
+  $('l-res').className = 'res ' + (r.ok ? 'good' : 'bad');
+  if (r.ok) { $('l-ver').value = ''; await $('l-ver').onchange(); await versions(); await armmap(); }
+};
+
+$('l-save').onclick = async () => {
+  const r = await fetch(`/api/calib/${LAB.site}/${LAB.cam}`,
+    { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(LAB.work) });
+  const body = await r.json();
+  $('l-res').className = 'res ' + (r.ok ? 'good' : 'bad');
+  if (!r.ok) { $('l-res').textContent = body.detail; return; }
+  LAB.dirty = false;
+  $('l-res').textContent = `saved as v${body.version} — active from now on`;
+  renderArmmap(body.armmap);
+  await versions();
+};
+
+// A re-aim mid-survey needs its own version, so switching away with unsaved work asks.
+$('l-site').onchange = async () => { if (keep()) await siteChanged(); else $('l-site').value = LAB.site; };
+$('l-cam').onchange = async () => { if (keep()) await camChanged(); else $('l-cam').value = LAB.cam; };
+
+async function armmap() {
+  if (!LAB.site) return;
+  renderArmmap(await (await fetch(`/api/calib/${LAB.site}/armmap`)).json());
+}
+
+function renderArmmap(m) {
+  const rows = $('armrows'), st = $('armstate');
+  rows.innerHTML = '';
+  m.arms.forEach(a => {
+    const cls = { owned: 's-ok', unowned: 's-warn', double: 's-bad' }[a.state];
+    const say = { owned: 'OWNED',
+                  unowned: "UNOWNED — its movements can't be counted",
+                  double: 'DOUBLE-OWNED — vehicles here count twice; remove one line' }[a.state];
+    const d = document.createElement('div');
+    d.className = 'armrow';
+    d.innerHTML = `<span class="state ${cls}">${a.state}</span>`
+      + `<span>${a.arm.replace(/</g, '&lt;')}${a.compass ? ' (' + a.compass + ')' : ''}</span>`
+      + `<span class="who">entry: ${a.entry.join(' + ') || '—'} · exit: ${a.exit.join(' + ') || '—'}</span>`
+      + `<span class="say ${a.state === 'double' ? 'bad' : a.state === 'unowned' ? 'warn' : ''}">${say}</span>`;
+    rows.appendChild(d);
+  });
+  $('armnotes').textContent = m.notes.map(n => `${n.cam}: ${n.note}`).join('\n');
+  const bad = m.arms.filter(a => a.state !== 'owned').length;
+  st.className = 'state ' + (!m.arms.length ? 's-idle' : bad ? 's-bad' : 's-ok');
+  st.textContent = !m.arms.length ? 'no calibrations'
+                 : bad ? `${bad} arm${bad === 1 ? ' needs' : 's need'} attention` : 'fully covered';
+}
+
+labInit();   // the ResizeObserver above already covers window resizes
 </script>
 </body>
 </html>
