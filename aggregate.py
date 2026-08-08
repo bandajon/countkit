@@ -301,6 +301,8 @@ def counts(site, date, data_root, ingest_root, config):
                      "bins_pct": round(len({t for (a, t) in probe if t in starts})
                                        / len(starts) * 100, 1) if starts else 0.0}
 
+    qa_pairing = pairing_qa(evs, moves)
+    qa_pairing["flagged"] = read_flags(data_root, site, date)["count"]
     return {
         "site": site, "date": date,
         "bins": rows,
@@ -312,7 +314,7 @@ def counts(site, date, data_root, ingest_root, config):
                       "tier2": sum(1 for m in moves if m["tier"] == 2),
                       "unpaired": len(leftovers)},
         "peaks": {"am": _peak(totals, starts, True), "pm": _peak(totals, starts, False)},
-        "qa": {"pairing": pairing_qa(evs, moves),
+        "qa": {"pairing": qa_pairing,
                "coverage": cov,
                "unmapped": unmapped,
                "offsets": engine.offsets(ingest_root, date, site),
@@ -327,6 +329,49 @@ def _leftover_qa(leftovers):
         d = out.setdefault(e["cam"], {"entry": 0, "exit": 0})
         d[e["kind"]] += 1
     return out
+
+
+def movements_detail(site, date, data_root, config, entry=None, exit=None,
+                     bin_ts=None, limit=30):
+    """Individual movements behind an aggregated cell, for the verification drawer.
+    Inferred pairs sort first: they are the ones a human most needs to eyeball."""
+    evs = load_events(data_root, site, date)
+    moves, _ = pair(evs, class_map(config))
+    out = [m for m in moves
+           if (entry is None or m["entry"] == entry)
+           and (exit is None or m["exit"] == exit)
+           and (bin_ts is None or m["bin"] == bin_ts)]
+    out.sort(key=lambda m: (-m["tier"], -m["dt"]))
+    return {"total": len(out),
+            "movements": [{**m, "bin_start": bin_iso(m["bin"]),
+                           "entry_time": bin_iso(m["entry_ts"])[11:],
+                           "entry_clock": datetime.fromtimestamp(m["entry_ts"], CAT)
+                                                  .strftime("%H:%M:%S"),
+                           "exit_clock": datetime.fromtimestamp(m["exit_ts"], CAT)
+                                                 .strftime("%H:%M:%S")}
+                          for m in out[:limit]]}
+
+
+def flags_path(data_root, site, date):
+    p = Path(data_root) / "flags"
+    p.mkdir(parents=True, exist_ok=True)
+    return p / f"{site}-{date}.jsonl"
+
+
+def add_flag(data_root, site, date, row):
+    """Flags land in QA notes and never touch a count — hand-edited numbers would
+    destroy the warranty argument, so the remedy is always re-running the analysis."""
+    with open(flags_path(data_root, site, date), "a") as f:
+        f.write(json.dumps({**row, "at": datetime.now(CAT).isoformat(timespec="seconds")})
+                + "\n")
+
+
+def read_flags(data_root, site, date):
+    p = flags_path(data_root, site, date)
+    rows = []
+    if p.exists():
+        rows = [json.loads(l) for l in p.read_text().splitlines() if l.strip()]
+    return {"count": len(rows), "rows": rows}
 
 
 def apply_pcu(classes, factors):

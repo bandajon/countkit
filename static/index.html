@@ -136,6 +136,61 @@
             letter-spacing:.18em; text-transform:uppercase; color:var(--dim); }
   summary:hover { color:var(--fg); }
 
+  /* --- Counts tab --- */
+  .qa { display:flex; flex-wrap:wrap; gap:12px; }
+  .qa > div { flex:1 1 220px; }
+  .big { font:700 34px/1 var(--mono); font-variant-numeric:tabular-nums; }
+  .sub { margin-top:6px; font:13px/1.5 var(--mono); color:var(--dim); }
+  .sub .inf.hot { color:var(--warn); font-weight:700; }
+  .strip { display:flex; height:8px; margin:10px 0 4px; border-radius:2px; overflow:hidden; }
+  .strip i { display:block; }
+  .strip .rec { background:#3d5164; } .strip .gap { background:var(--bad); }
+  .probe { border:1px dashed rgba(255,255,255,.22); border-radius:4px; padding:12px; }
+  .attrib { margin-top:8px; font:10px/1.4 var(--mono); letter-spacing:.1em;
+            text-transform:uppercase; color:var(--dim); }
+  .chip { display:inline-flex; align-items:center; gap:7px; min-height:40px; margin:0 6px 6px 0;
+          padding:0 12px; font:13px/1 var(--mono); color:var(--fg); background:none;
+          border:1px solid rgba(255,255,255,.25); border-radius:4px; cursor:pointer; }
+  .chip.unset { border-color:var(--bad); color:var(--bad); }
+
+  .tblwrap { overflow-x:auto; }
+  table.bins { border-collapse:collapse; font:13px/1.3 var(--mono);
+               font-variant-numeric:tabular-nums; }
+  table.bins th, table.bins td { padding:6px 10px; border-bottom:1px solid var(--line);
+                                 text-align:right; white-space:nowrap; }
+  table.bins th.arm { text-align:center; border-bottom:2px solid currentColor; }
+  /* The bin column stays put when three or more arms push the table sideways. */
+  table.bins .binc { position:sticky; left:0; z-index:1; text-align:left;
+                     background:var(--panel); }
+  table.bins tr.peak td { background:rgba(255,255,255,.055); font-weight:600; }
+  table.bins tr.peak .binc { background:#1f2429; }
+  table.bins tfoot td { color:var(--dim); border-bottom:0; }
+  /* A gap is not a zero: hatching says "no footage", an empty cell would lie. */
+  td.gap { background:repeating-linear-gradient(45deg,#2a2420 0 3px,#191d21 3px 6px); }
+
+  .od { border-collapse:collapse; font:13px/1.3 var(--mono); }
+  .od th, .od td { padding:8px 12px; border:1px solid var(--line); text-align:right; }
+  .od th { color:var(--dim); font-weight:400; }
+  .od td.cell { cursor:pointer; }
+  .od td.cell:hover { background:rgba(255,255,255,.06); }
+  .od .inf { display:block; font-size:11px; color:var(--dim); }
+  .od td.diag { color:var(--dim); }
+  .seg { display:inline-flex; }
+  .seg .btn { border-radius:0; margin-left:-1px; min-height:40px; font-size:13px; }
+  .seg .btn:first-child { border-radius:4px 0 0 4px; margin-left:0; }
+  .seg .btn:last-child { border-radius:0 4px 4px 0; }
+  .seg .btn.on { background:var(--fg); border-color:var(--fg); color:var(--bg); }
+
+  .mv { display:flex; flex-wrap:wrap; gap:12px; align-items:center;
+        padding:10px 0; border-top:1px solid var(--line); }
+  .mv img, .mv .nocrop { height:96px; border:1px solid var(--line); border-radius:2px; }
+  .mv .nocrop { display:flex; align-items:center; width:128px; padding:8px;
+                font:11px/1.35 var(--mono); color:var(--dim); background:var(--well); }
+  .mv figure { margin:0; }
+  .mv figcaption { margin-top:4px; font:11px/1.3 var(--mono); color:var(--dim); }
+  .internal { font:10px/1 var(--mono); letter-spacing:.14em; text-transform:uppercase;
+              color:var(--warn); }
+
   @media (prefers-reduced-motion: reduce) { * { transition:none !important; } }
 </style>
 </head>
@@ -244,8 +299,42 @@
     <div id="joblist"><p class="empty">no jobs yet · queue a verified site-day above</p></div>
   </section>
   <section id="counts">
-    <h2>Counts — aggregation &amp; QA</h2>
-    <p class="empty">no analyzed site-days yet · run a job in Analyze first</p>
+    <div class="row" style="margin-bottom:12px">
+      <select id="c-day" class="grow" aria-label="site-day"></select>
+      <select id="c-class" aria-label="class filter"><option value="">all classes</option></select>
+      <button class="btn" id="c-pcu">PCU off</button>
+    </div>
+
+    <div class="panel qa" id="qa">
+      <p class="empty">pick an analyzed site-day</p>
+    </div>
+
+    <div class="eyebrow" style="margin:18px 0 8px">15-minute bins · entry crossings</div>
+    <div class="panel tblwrap"><table class="bins" id="bintable"></table></div>
+
+    <div class="eyebrow" style="margin:18px 0 8px">per-approach profile</div>
+    <div class="panel" id="sparks"></div>
+
+    <div class="row" style="margin:18px 0 8px">
+      <span class="eyebrow grow">turning movements</span>
+      <span class="seg" id="c-period">
+        <button class="btn" data-p="am">AM peak</button>
+        <button class="btn" data-p="pm">PM peak</button>
+        <button class="btn on" data-p="day">Day</button>
+      </span>
+    </div>
+    <div class="panel tblwrap"><table class="od" id="odtable"></table></div>
+
+    <div class="panel" id="drawer" hidden>
+      <div class="row">
+        <span class="eyebrow">verification</span>
+        <span class="grow mono" id="dr-title"></span>
+        <span class="internal">internal qa</span>
+        <button class="btn" id="dr-close">Close</button>
+      </div>
+      <div class="sub">view only — flagging records a QA note and never changes a count</div>
+      <div id="dr-rows"></div>
+    </div>
   </section>
   <section id="report">
     <h2>Report — deliverable</h2>
@@ -894,6 +983,380 @@ addEventListener('hashchange', () => { if (location.hash.slice(2) === 'analyze')
 if (location.hash.slice(2) === 'analyze') days();
 jobsPoll(); jobsStream();
 setInterval(() => { if (!es && location.hash.slice(2) === 'analyze') jobsPoll(); }, 5000);
+
+// ---------------- Counts tab: QA first, then the numbers ----------------
+const CNT = {site: '', date: '', data: null, cls: '', pcu: false, period: 'day', flags: []};
+// Per-approach accents live only in charts and table headers — never on chrome.
+const ACCENT = ['#86a8cf', '#cfa886', '#9ac2a8', '#c791b5'];
+const accent = i => ACCENT[i % ACCENT.length];
+const esc = s => String(s).replace(/</g, '&lt;');
+
+// One place decides what a cell is worth: the class filter and the PCU toggle.
+function val(classes) {
+  const f = (CNT.data && CNT.data.pcu_factors) || {};
+  let n = 0;
+  for (const c in classes) {
+    if (CNT.cls && c !== CNT.cls) continue;
+    n += CNT.pcu ? classes[c] * (+f[c] || 1) : classes[c];
+  }
+  return CNT.pcu ? Math.round(n * 10) / 10 : n;
+}
+
+async function countsInit() {
+  const rows = await (await fetch('/api/ingest')).json();
+  const opts = [];
+  for (const r of rows) {
+    const st = await (await fetch(`/api/analyze/status/${r.site}/${r.date}`)).json();
+    if (st.events) opts.push(`<option value="${r.site}|${r.date}">${r.date} · ${r.site}`
+                             + ` · ${st.events} events</option>`);
+  }
+  $('c-day').innerHTML = opts.join('')
+    || '<option value="">no analyzed site-days yet — run a job in Analyze</option>';
+  if (opts.length) { $('c-day').selectedIndex = 0; await loadCounts(); }
+  else $('qa').innerHTML = '<p class="empty">no analyzed site-days yet · run a job in Analyze first</p>';
+}
+
+async function loadCounts() {
+  const [site, date] = ($('c-day').value || '|').split('|');
+  if (!site) return;
+  CNT.site = site; CNT.date = date;
+  CNT.data = await (await fetch(`/api/counts/${site}/${date}`)).json();
+  CNT.flags = (await (await fetch(`/api/flags/${site}/${date}`)).json()).rows;
+  const sel = $('c-class'), keep = CNT.cls;
+  sel.innerHTML = '<option value="">all classes</option>'
+    + CNT.data.classes.map(c => `<option${c === keep ? ' selected' : ''}>${c}</option>`).join('');
+  CNT.cls = sel.value;
+  $('drawer').hidden = true;
+  renderAll();
+}
+
+function renderAll() { qaPanel(); binTable(); sparks(); odMatrix(); }
+
+function qaPanel() {
+  const d = CNT.data, p = d.qa.pairing, cov = d.qa.coverage;
+  const hot = p.inferred_share > 30;
+  const dot = {ok: 's-ok', warn: 's-warn', bad: 's-bad'}[p.state] || 's-idle';
+  let html = `<div>
+      <div class="eyebrow">pairing rate</div>
+      <div class="big">${p.rate}%</div>
+      <div class="sub"><span class="state ${dot}">${p.state}</span></div>
+      <div class="sub">${p.same}% same-camera · <span class="inf${hot ? ' hot' : ''}">`
+    + `${p.inferred}% inferred</span></div>`
+    + (hot ? '<div class="res warn">heavy cross-camera inference — check arm ownership'
+             + ' and offsets</div>' : '')
+    + `<div class="sub">${p.paired}/${p.entries} entries paired`
+    + `${p.flagged ? ' · ' + p.flagged + ' flagged' : ''}</div></div>`;
+
+  const win = cov.window, span = (win[1] - win[0]) || 1;
+  const cams = Object.entries(cov.per_cam);
+  const hours = cams.reduce((a, [, c]) => Math.max(a, c.hours), 0);
+  html += `<div><div class="eyebrow">coverage</div>`
+    + `<div class="big">${hours} h</div>`
+    + `<div class="sub">of ${cov.expected_hours} h surveyed</div>`;
+  for (const [cam, c] of cams) {
+    let strip = '', at = win[0];
+    for (const [s, e] of c.recorded) {
+      if (s > at) strip += `<i class="gap" style="width:${(s - at) / span * 100}%"></i>`;
+      strip += `<i class="rec" style="width:${(e - Math.max(s, at)) / span * 100}%"></i>`;
+      at = Math.max(at, e);
+    }
+    if (at < win[1]) strip += `<i class="gap" style="width:${(win[1] - at) / span * 100}%"></i>`;
+    html += `<div class="sub">${cam} · ${c.hours} h</div><div class="strip">${strip}</div>`;
+  }
+  html += '</div>';
+
+  html += `<div><div class="eyebrow">clock offsets</div><div id="offchips"></div>`
+    + `<div class="res" id="offres"></div></div>`;
+
+  const pr = d.qa.probe;
+  if (pr) {
+    const thin = pr.median_n < 10;
+    html += `<div class="probe"><div class="eyebrow">probe</div>`
+      + `<div class="big">n̄ ${pr.median_n}/bin</div>`
+      + `<div class="sub">${pr.bins_pct}% bins</div>`
+      + `<div class="res${thin ? ' warn' : ''}">${thin
+          ? 'thin probe sample — corroboration only, per research memo'
+          : 'corroboration only'}</div>`
+      + `<div class="attrib">© ${esc(pr.provider || 'provider')}</div></div>`;
+  }
+  const un = Object.entries(d.qa.unmapped);
+  if (un.length) html += `<div><div class="eyebrow">unmapped labels</div>`
+    + `<div class="sub">${un.map(([k, n]) => esc(k) + ' ×' + n).join('<br>')}</div>`
+    + `<div class="res warn">counted as "other" — add them to config classes</div></div>`;
+  $('qa').innerHTML = html;
+  offChips();
+}
+
+async function offChips() {
+  const offs = await (await fetch(`/api/offsets/${CNT.site}/${CNT.date}`)).json();
+  const box = $('offchips');
+  if (!box) return;
+  box.innerHTML = '';
+  for (const cam in offs) {
+    const v = offs[cam], unset = v === null || v === undefined;
+    const b = document.createElement('button');
+    b.className = 'chip' + (unset ? ' unset' : '');
+    b.innerHTML = unset ? `<span class="state s-bad">${cam} unset</span>`
+                        : `${cam} ${v >= 0 ? '+' : ''}${v} s`;
+    b.onclick = () => offEditor(cam, v);
+    box.appendChild(b);
+  }
+}
+
+function offEditor(cam, cur) {
+  const box = $('offres');
+  box.className = 'res';
+  box.innerHTML = `<div class="sub">seconds ADDED to file timestamps to get true`
+    + ` Africa/Lusaka time — a camera left on China time needs −21600.`
+    + ` Zero must be entered explicitly.</div>`;
+  const inp = document.createElement('input');
+  inp.type = 'number'; inp.step = 'any'; inp.value = cur === null ? '' : cur;
+  inp.style.cssText = 'margin:8px 8px 0 0;max-width:160px';
+  const save = document.createElement('button');
+  save.className = 'btn go'; save.textContent = `Save ${cam}`;
+  save.onclick = async () => {
+    const r = await post('/api/offsets', {site: CNT.site, date: CNT.date, cam,
+                                          offset_s: inp.value === '' ? null : +inp.value});
+    box.className = 'res ' + (r.ok ? 'warn' : 'bad');
+    box.textContent = r.ok
+      ? 'changed offsets take effect on the next Analyze run — re-run the site-day'
+      : (await r.json()).detail;
+    offChips();
+  };
+  box.appendChild(inp); box.appendChild(save);
+}
+
+$('c-day').onchange = loadCounts;
+$('c-class').onchange = () => { CNT.cls = $('c-class').value; renderAll(); };
+$('c-pcu').onclick = () => {
+  CNT.pcu = !CNT.pcu;
+  $('c-pcu').textContent = 'PCU ' + (CNT.pcu ? 'on' : 'off');
+  $('c-pcu').classList.toggle('go', CNT.pcu);
+  renderAll();
+};
+document.querySelectorAll('#c-period .btn').forEach(b => b.onclick = () => {
+  CNT.period = b.dataset.p;
+  document.querySelectorAll('#c-period .btn').forEach(x => x.classList.toggle('on', x === b));
+  odMatrix(); $('drawer').hidden = true;
+});
+function peakBins(p) {
+  if (!p) return [];
+  const i = CNT.data.bins.findIndex(b => b.start === p.start);
+  return i < 0 ? [] : CNT.data.bins.slice(i, i + 4).map(b => b.ts);
+}
+
+function phf(bins, arm) {
+  const v = bins.map(b => arm ? val(b.arms[arm].classes) : val(allClasses(b)));
+  const tot = v.reduce((a, n) => a + n, 0), busiest = Math.max(...v, 0);
+  return busiest ? (tot / (4 * busiest)).toFixed(2) : '—';
+}
+
+function allClasses(b) {
+  const out = {};
+  for (const a in b.arms) for (const c in b.arms[a].classes)
+    out[c] = (out[c] || 0) + b.arms[a].classes[c];
+  return out;
+}
+
+function binTable() {
+  const d = CNT.data, arms = d.arms, t = $('bintable');
+  if (!d.bins.length) { t.innerHTML = '<caption class="empty">no bins</caption>'; return; }
+  const am = peakBins(d.peaks.am), pm = peakBins(d.peaks.pm);
+  let head = '<thead><tr><th class="binc">bin</th>'
+    + arms.map((a, i) => `<th class="arm" style="color:${accent(i)}">${esc(a)}</th>`).join('')
+    + '<th>total</th></tr></thead><tbody>';
+  let body = '';
+  for (const b of d.bins) {
+    const peak = am.includes(b.ts) || pm.includes(b.ts);
+    body += `<tr class="${peak ? 'peak' : ''}"><td class="binc">${b.start.slice(11, 16)}</td>`;
+    let row = 0;
+    for (const a of arms) {
+      const cell = b.arms[a];
+      if (cell.gap) {
+        // A gap must never look like a zero — hatched, empty, and it says why.
+        body += '<td class="gap" title="no footage — missing, not zero"></td>';
+      } else {
+        const n = val(cell.classes);
+        row += n;
+        // A measured zero prints as 0. Blank means only one thing — the hatched gap —
+        // because at the spec's hatch contrast an empty cell would read as either.
+        body += `<td>${n}</td>`;
+      }
+    }
+    body += `<td>${row}</td></tr>`;
+  }
+  let foot = '<tfoot>';
+  for (const [label, bins] of [['AM peak', am], ['PM peak', pm]]) {
+    if (!bins.length) continue;
+    const rows = d.bins.filter(b => bins.includes(b.ts));
+    foot += `<tr><td class="binc">${label}</td>`
+      + arms.map(a => rows.reduce((s, b) => s + val(b.arms[a].classes), 0)).map(n => `<td>${n}</td>`).join('')
+      + `<td>${rows.reduce((s, b) => s + val(allClasses(b)), 0)}</td></tr>`
+      + `<tr><td class="binc">PHF</td>`
+      + arms.map(a => `<td>${phf(rows, a)}</td>`).join('')
+      + `<td>${phf(rows, null)}</td></tr>`;
+  }
+  foot += `<tr><td class="binc">day total</td>`
+    + arms.map(a => `<td>${d.bins.reduce((s, b) => s + val(b.arms[a].classes), 0)}</td>`).join('')
+    + `<td>${d.bins.reduce((s, b) => s + val(allClasses(b)), 0)}</td></tr></tfoot>`;
+  t.innerHTML = head + body + '</tbody>' + foot;
+}
+
+function sparks() {
+  const d = CNT.data, box = $('sparks');
+  if (!d.bins.length) { box.innerHTML = '<p class="empty">no bins</p>'; return; }
+  const W = 640, H = 54, n = d.bins.length;
+  const x = i => (n < 2 ? 0 : i / (n - 1) * (W - 4)) + 2;
+  const pr = d.qa.probe;
+  box.innerHTML = '';
+  d.arms.forEach((arm, ai) => {
+    const vals = d.bins.map(b => b.arms[arm].gap ? null : val(b.arms[arm].classes));
+    const top = Math.max(1, ...vals.filter(v => v !== null));
+    const y = v => H - 4 - v / top * (H - 10);
+    // Gaps break the line: interpolating across missing footage would invent traffic.
+    let segs = [], cur = [];
+    vals.forEach((v, i) => {
+      if (v === null) { if (cur.length) segs.push(cur); cur = []; }
+      else cur.push(`${x(i)},${y(v)}`);
+    });
+    if (cur.length) segs.push(cur);
+    let svg = segs.map(s => `<polyline fill="none" stroke="${accent(ai)}" stroke-width="2"`
+                          + ` points="${s.join(' ')}"/>`).join('');
+    vals.forEach((v, i) => { if (v === null) svg += `<rect x="${x(i) - 1}" y="${H - 8}"`
+      + ` width="2" height="4" fill="#8a939b"><title>gap — no footage</title></rect>`; });
+    if (pr && CNT.probeOn) {
+      const cells = {};
+      pr.cells.filter(c => c.arm === arm).forEach(c => { cells[c.bin] = c; });
+      const pmax = Math.max(1, ...Object.values(cells).map(c => c.delay_s));
+      let ps = [], pcur = [];
+      d.bins.forEach((b, i) => {
+        const c = cells[b.ts];
+        if (!c) { if (pcur.length) ps.push(pcur); pcur = []; }
+        else pcur.push(`${x(i)},${H - 4 - c.delay_s / pmax * (H - 10)}`);
+      });
+      if (pcur.length) ps.push(pcur);
+      svg += ps.map(s => `<polyline fill="none" stroke="#8a939b" stroke-width="1.5"`
+        + ` stroke-dasharray="4 4" points="${s.join(' ')}"/>`).join('');
+      d.bins.forEach((b, i) => { const c = cells[b.ts]; if (c)
+        svg += `<circle cx="${x(i)}" cy="${H - 4 - c.delay_s / pmax * (H - 10)}" r="4"`
+          + ` fill="transparent"><title>${c.delay_s}s delay · n=${c.sample_n}</title></circle>`; });
+    }
+    const div = document.createElement('div');
+    div.style.marginBottom = '10px';
+    div.innerHTML = `<div class="sub" style="color:${accent(ai)}">${esc(arm)}`
+      + ` <span style="color:var(--dim)">peak ${top}</span></div>`
+      + `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" role="img"`
+      + ` aria-label="${esc(arm)} profile">${svg}</svg>`;
+    box.appendChild(div);
+  });
+  if (pr) {
+    const t = document.createElement('button');
+    t.className = 'btn'; t.textContent = 'Probe ' + (CNT.probeOn ? 'on' : 'off');
+    t.onclick = () => { CNT.probeOn = !CNT.probeOn; sparks(); };
+    box.appendChild(t);
+    box.insertAdjacentHTML('beforeend', `<div class="attrib">© ${esc(pr.provider)}`
+      + ' · corroboration only, never a counted series</div>');
+  }
+}
+
+function periodBins() {
+  const d = CNT.data;
+  if (CNT.period === 'am') return peakBins(d.peaks.am);
+  if (CNT.period === 'pm') return peakBins(d.peaks.pm);
+  return d.bins.map(b => b.ts);
+}
+
+function odMatrix() {
+  const d = CNT.data, t = $('odtable'), keep = periodBins();
+  const cells = d.movements.od.filter(c => keep.includes(c.bin)
+                                      && (!CNT.cls || c.cls === CNT.cls));
+  const f = d.pcu_factors || {};
+  const grid = {};
+  for (const c of cells) {
+    const k = c.entry + ' ' + c.exit;
+    const w = CNT.pcu ? (+f[c.cls] || 1) : 1;
+    const g = grid[k] || (grid[k] = {n: 0, t2: 0});
+    g.n += c.count * w; g.t2 += c.tier2_count * w;
+  }
+  const entries = d.arms, exits = d.arms;
+  if (!entries.length) { t.innerHTML = '<caption class="empty">no movements</caption>'; return; }
+  let html = '<thead><tr><th>entry \\ exit</th>'
+    + exits.map((a, i) => `<th style="color:${accent(i)}">${esc(a)}</th>`).join('')
+    + '</tr></thead><tbody>';
+  for (const [i, en] of entries.entries()) {
+    html += `<tr><th style="color:${accent(i)};text-align:left">${esc(en)}</th>`;
+    for (const ex of exits) {
+      const g = grid[en + ' ' + ex];
+      const n = g ? (CNT.pcu ? Math.round(g.n * 10) / 10 : g.n) : 0;
+      const inf = g && g.t2 ? Math.round(g.t2 / g.n * 100) : 0;
+      // A client-facing number must never hide how confident it is.
+      html += `<td class="cell${en === ex ? ' diag' : ''}" data-e="${esc(en)}"`
+        + ` data-x="${esc(ex)}">${n || '·'}`
+        + `${inf ? `<span class="inf">·${inf}% inf</span>` : ''}</td>`;
+    }
+    html += '</tr>';
+  }
+  t.innerHTML = html + '</tbody>';
+  t.querySelectorAll('td.cell').forEach(td => td.onclick =
+    () => drawer(td.dataset.e, td.dataset.x));
+}
+
+async function drawer(entry, exit) {
+  const keep = periodBins();
+  const r = await (await fetch(`/api/movements/${CNT.site}/${CNT.date}`
+    + `?entry=${encodeURIComponent(entry)}&exit=${encodeURIComponent(exit)}&limit=200`)).json();
+  const rows = r.movements.filter(m => keep.includes(m.bin)
+                                  && (!CNT.cls || m.cls === CNT.cls)).slice(0, 30);
+  const period = {am: 'AM peak', pm: 'PM peak', day: 'full day'}[CNT.period];
+  $('dr-title').textContent = `${entry} → ${exit} · ${period}`
+    + ` · showing ${rows.length} of ${r.total}`;
+  const box = $('dr-rows');
+  box.innerHTML = rows.length ? '' : '<p class="empty">no movements in this cell</p>';
+  for (const m of rows) {
+    const div = document.createElement('div');
+    div.className = 'mv';
+    const shot = (key, cam, clock) => key
+      ? `<figure><img src="/api/crop/${key}" alt="" loading="lazy"`
+        + ` onerror="this.replaceWith(nocrop())">`
+        + `<figcaption>${cam} · ${clock}</figcaption></figure>`
+      : `<figure><div class="nocrop">no crop — analysis predates crops or the write`
+        + ` failed</div><figcaption>${cam} · ${clock}</figcaption></figure>`;
+    const flagged = CNT.flags.some(f => f.entry_ts === m.entry_ts);
+    div.innerHTML = shot(m.crops[0], m.entry_cam, m.entry_clock)
+      + shot(m.crops[1], m.exit_cam, m.exit_clock)
+      + `<span class="state ${m.tier === 2 ? 's-warn' : 's-ok'}">`
+      + `${m.tier === 2 ? 'inferred' : 'same camera'}</span>`
+      + `<span class="sub">${esc(m.cls)} · Δt ${m.dt}s · ${m.bin_start.slice(11, 16)}</span>`;
+    const b = document.createElement('button');
+    b.className = 'btn'; b.style.marginLeft = 'auto';
+    b.textContent = flagged ? 'Flagged' : 'Flag';
+    b.disabled = flagged;
+    b.onclick = async () => {
+      await post('/api/flag', {site: CNT.site, date: CNT.date, entry, exit,
+                               bin: m.bin, entry_ts: m.entry_ts});
+      CNT.flags.push({entry_ts: m.entry_ts});
+      b.textContent = 'Flagged'; b.disabled = true;
+      CNT.data = await (await fetch(`/api/counts/${CNT.site}/${CNT.date}`)).json();
+      qaPanel();                       // flags move QA copy, never a count
+    };
+    div.appendChild(b);
+    box.appendChild(div);
+  }
+  $('drawer').hidden = false;
+  $('drawer').scrollIntoView({block: 'nearest'});
+}
+
+// A crop that 404s becomes a labelled box, never a broken-image icon.
+function nocrop() {
+  const d = document.createElement('div');
+  d.className = 'nocrop';
+  d.textContent = 'no crop — analysis predates crops or the write failed';
+  return d;
+}
+
+$('dr-close').onclick = () => { $('drawer').hidden = true; };
+addEventListener('hashchange', () => { if (location.hash.slice(2) === 'counts') countsInit(); });
+if (location.hash.slice(2) === 'counts') countsInit();
 </script>
 </body>
 </html>

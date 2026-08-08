@@ -321,6 +321,43 @@ def counts_get(site: str, date: str):
     return aggregate.counts(site, date, data_root(), ingest_root(), CONFIG)
 
 
+CDN_BASE = ""     # Task 8 fills this in; empty means local crops only
+
+
+@app.get("/api/crop/{key:path}")
+def crop_get(key: str):
+    """Evidence crops are served from disk. A missing crop is a labelled placeholder
+    in the UI, never a broken image — so 404 here is an expected state, not an error."""
+    if ".." in key or key.startswith("/"):
+        raise HTTPException(400, "bad crop key")
+    p = data_root() / "crops" / key
+    if not p.is_file():
+        raise HTTPException(404, "no crop")
+    return FileResponse(p, media_type="image/jpeg")
+
+
+@app.get("/api/movements/{site}/{date}")
+def movements_get(site: str, date: str, entry: str = None, exit: str = None,
+                  bin: int = None, limit: int = 30):
+    return aggregate.movements_detail(site, date, data_root(), CONFIG,
+                                      entry, exit, bin, limit)
+
+
+@app.get("/api/flags/{site}/{date}")
+def flags_get(site: str, date: str):
+    return aggregate.read_flags(data_root(), site, date)
+
+
+@app.post("/api/flag")
+def flag_post(body: dict = Body(default={})):
+    site, date = body.get("site") or "", body.get("date") or ""
+    if not (site and date):
+        raise HTTPException(400, "site and date are required")
+    aggregate.add_flag(data_root(), site, date,
+                       {k: body.get(k) for k in ("entry", "exit", "bin", "entry_ts")})
+    return aggregate.read_flags(data_root(), site, date)
+
+
 @app.get("/api/offsets/{site}/{date}")
 def offsets_get(site: str, date: str):
     """Every camera of the site-day, with null for the ones still unset."""
