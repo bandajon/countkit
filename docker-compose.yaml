@@ -1,0 +1,66 @@
+# CountKit on NVIDIA hardware. The host needs only the driver and the NVIDIA
+# container toolkit; everything else is in the image.
+#
+#   docker compose --profile yolo        up -d   # any x86 GPU, incl. RTX 5080
+#   docker compose --profile yolo-jetson up -d   # Orin Nano, JetPack 6
+#   docker compose --profile ds-x86      up -d   # DeepStream 9.1 (Blackwell native)
+#   docker compose --profile ds-jetson   up -d   # DeepStream 7.1 (JetPack 6)
+#
+# Before the first `up`: `cp config.example.yaml config.yaml && mkdir -p ingest data`
+# — a bind mount of a missing host path becomes a directory, not a file.
+
+x-countkit: &countkit
+  ports:
+    - "8090:8090"
+  volumes:
+    - ./config.yaml:/countkit/config.yaml
+    - ./ingest:/countkit/ingest
+    - ./data:/countkit/data
+    # Ultralytics weight cache — a no-op in the DeepStream images, but a merge key
+    # replaces a list rather than extending it, so it lives here for all four.
+    - ultralytics-cache:/root/.config/Ultralytics
+  restart: unless-stopped
+
+services:
+  countkit-yolo:
+    <<: *countkit
+    profiles: [yolo]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.yolo
+      args:
+        BASE: ultralytics/ultralytics:latest
+    gpus: all
+
+  countkit-yolo-jetson:
+    <<: *countkit
+    profiles: [yolo-jetson]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.yolo
+      args:
+        BASE: ultralytics/ultralytics:latest-jetson-jetpack6
+    runtime: nvidia
+
+  countkit-ds-x86:
+    <<: *countkit
+    profiles: [ds-x86]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.deepstream
+      args:
+        BASE: nvcr.io/nvidia/deepstream:9.1-triton-multiarch
+    gpus: all
+
+  countkit-ds-jetson:
+    <<: *countkit
+    profiles: [ds-jetson]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.deepstream
+      args:
+        BASE: nvcr.io/nvidia/deepstream:7.1-triton-multiarch
+    runtime: nvidia
+
+volumes:
+  ultralytics-cache:
