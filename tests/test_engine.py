@@ -132,6 +132,23 @@ def geometry():
     assert engine.gate_crossing(g, [500, 100], [500, 200]) is None, "never reaches it"
 
 
+def a_centroid_exactly_on_the_line():
+    """The on-line corner: a centroid landing exactly on the gate. The crossing has
+    already fired (the step before it was strictly on one side), so it must count once
+    and only once — not zero, and not again on the step that leaves the line."""
+    g = {"kind": "entry", "name": "on-line", "compass": "", "dir": "AB",
+         "points": [[0, 400], [1920, 400]]}
+    track = [[500, 440], [500, 420], [500, 400.0], [500, 380]]
+    def hits(ln):
+        return [engine.gate_crossing(ln, track[i - 1], track[i])
+                for i in range(1, len(track))]
+    assert hits(g).count(True) == 1, f"landing on the line lost the count: {hits(g)}"
+    assert hits(g).count(False) == 0, f"counted twice through the line: {hits(g)}"
+    flipped = {**g, "dir": "BA"}
+    assert hits(flipped).count(True) == 0, f"BA counted the wrong way: {hits(flipped)}"
+    assert hits(flipped).count(False) == 1, "the against-direction debounce never armed"
+
+
 def epochs():
     assert engine.segment_epoch(SEG) == time.mktime(time.strptime(
         "20260804-070000", "%Y%m%d-%H%M%S"))
@@ -310,6 +327,29 @@ def a_failed_detector_keeps_the_last_run():
     assert crop_bytes() == before_crops, "it wiped the previous crops too"
 
 
+class DiesMidRun(engine.MockDetector):
+    """Starts fine, then dies partway through the second camera — the crash, the cancel
+    and the pulled power cable all land here."""
+
+    def __iter__(self):
+        for i, frame in enumerate(super().__iter__()):
+            if self.cam == "cam2" and i:
+                raise RuntimeError("decoder died mid-segment")
+            yield frame
+
+
+def a_crash_mid_run_keeps_the_last_run():
+    build()
+    run_with(engine.MockDetector)
+    before = rows()
+    try:
+        run_with(DiesMidRun)
+        raise AssertionError("a detector that died mid-run was accepted")
+    except RuntimeError:
+        pass
+    assert rows() == before, f"a partial run was left behind and reads as done: {rows()}"
+
+
 # ---- a footage gap is not a road: nothing may be paired across one ----
 
 GAP_SITE = "kalulushi"
@@ -366,6 +406,7 @@ def unknown_detector_fails_loudly():
 
 check("chevron convention: counted traffic arrives on the arrow side", chevron_convention)
 check("crossing geometry: direction, dir flip, segment ends", geometry)
+check("a centroid landing exactly on the gate counts once", a_centroid_exactly_on_the_line)
 check("segment filenames parse to wallclock", epochs)
 check("crossings detected once per object per gate", detects_and_debounces)
 check("clock offset corrects a China-time camera", offset_is_applied)
@@ -380,6 +421,7 @@ check("a detector's own crop bytes reach disk", detector_crops_are_used)
 check("a detector without crop_for gets the placeholder", no_crop_for_falls_back)
 check("a raising crop_for degrades to the placeholder", a_failing_crop_does_not_stop_analysis)
 check("a detector that cannot start leaves the last run intact", a_failed_detector_keeps_the_last_run)
+check("a run that dies mid-stream leaves the last run intact", a_crash_mid_run_keeps_the_last_run)
 check("a footage gap resets the tracker", a_gap_resets_the_tracker)
 check("an unknown detector: value fails loudly", unknown_detector_fails_loudly)
 
