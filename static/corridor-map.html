@@ -1,0 +1,173 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>CountKit · Corridor congestion</title>
+<!-- Leaflet 1.9.4, vendored: static/vendor/leaflet/ (unpkg leaflet@1.9.4/dist).
+     Nothing is fetched from a CDN at runtime — the Orin is often on a field LAN. -->
+<link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css">
+<script src="/static/vendor/leaflet/leaflet.js"></script>
+<style>
+  :root {
+    --bg:#111417; --panel:#191d21; --line:rgba(255,255,255,.14);
+    --fg:#e8eaec; --dim:#8a939b;
+    --ok:#4a9e6f; --warn:#c29a4a; --bad:#c25454; --survey:#86a8cf;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  html, body { height:100%; margin:0; }
+  body { background:var(--bg); color:var(--fg);
+         font:16px/1.45 "Avenir Next", Inter, system-ui, -apple-system, sans-serif; }
+  #map { position:absolute; inset:0; background:var(--bg); }
+  .leaflet-container { background:var(--bg); font-family:inherit; }
+  /* The basemap is a backdrop, not the subject: mute it so the corridor reads first. */
+  .leaflet-tile-pane { filter:invert(1) hue-rotate(180deg) brightness(.85) saturate(.4); }
+
+  #panel { position:absolute; z-index:500; top:12px; left:12px; width:320px; max-width:calc(100% - 24px);
+           max-height:calc(100% - 24px); overflow:auto; padding:16px;
+           background:var(--panel); border:1px solid var(--line); border-radius:4px; }
+  h1 { margin:0 0 12px; font:600 11px/1.4 var(--mono); letter-spacing:.18em;
+       text-transform:uppercase; color:var(--fg); }
+  .seg { display:flex; margin-bottom:14px; }
+  .seg button { flex:1; min-height:40px; font:600 13px/1 var(--mono); color:var(--fg);
+                background:none; border:1px solid rgba(255,255,255,.25); cursor:pointer; }
+  .seg button:first-child { border-radius:4px 0 0 4px; }
+  .seg button:last-child { border-radius:0 4px 4px 0; margin-left:-1px; }
+  .seg button.on { background:var(--fg); border-color:var(--fg); color:var(--bg); }
+  .key { display:flex; align-items:center; gap:9px; margin-bottom:7px;
+         font:12px/1.3 var(--mono); color:var(--dim); }
+  .key i { width:22px; height:4px; border-radius:2px; flex:none; }
+  .key .dot { width:11px; height:11px; border-radius:50%; }
+  .note { margin-top:14px; padding-top:12px; border-top:1px solid var(--line);
+          font:11px/1.55 var(--mono); color:var(--dim); }
+  .attrib { margin-top:10px; font:10px/1.4 var(--mono); letter-spacing:.1em;
+            text-transform:uppercase; color:var(--dim); }
+  a { color:var(--fg); }
+  #back { display:inline-block; margin-top:12px; min-height:40px; padding:11px 14px;
+          font:600 12px/1 var(--mono); letter-spacing:.08em; text-transform:uppercase;
+          text-decoration:none; border:1px solid rgba(255,255,255,.25); border-radius:4px; }
+  #state { margin-bottom:12px; font:12px/1.5 var(--mono); color:var(--warn); }
+  .leaflet-popup-content-wrapper, .leaflet-popup-tip {
+    background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:4px; }
+  .leaflet-popup-content { margin:12px 14px; font:13px/1.5 var(--mono); }
+  .leaflet-popup-content b { font-size:15px; }
+  .leaflet-control-attribution { background:rgba(17,20,23,.85); color:var(--dim); }
+  .leaflet-control-attribution a { color:var(--dim); }
+</style>
+
+<div id="map"></div>
+<div id="panel">
+  <h1>CountKit · Corridor congestion</h1>
+  <div id="state"></div>
+  <div class="seg" id="period">
+    <button data-p="am" class="on">AM PEAK</button>
+    <button data-p="pm">PM PEAK</button>
+  </div>
+  <div class="key"><i style="background:#4a9e6f"></i>NORMAL</div>
+  <div class="key"><i style="background:#c29a4a"></i>SLOW</div>
+  <div class="key"><i style="background:#c25454"></i>TRAFFIC_JAM · heat halo</div>
+  <div class="key"><span class="dot" style="background:#86a8cf"></span>surveyed junction</div>
+  <div class="key"><span class="dot" style="border:2px solid #86a8cf"></span>planned junction</div>
+  <div class="note">Congestion categories are Google Routes API speedReadingIntervals
+    (NORMAL / SLOW / TRAFFIC_JAM) — a live, attributed, display-only glance. Google ToS
+    bar storing this series; the storable correlation work runs on the licensed TomTom
+    dataset.</div>
+  <div class="attrib">powered by Google</div>
+  <a id="back" href="/#/counts">← Counts</a>
+</div>
+
+<script>
+const COLOR = ['#4a9e6f', '#c29a4a', '#c25454'];      // NORMAL / SLOW / TRAFFIC_JAM
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/</g, '&lt;');
+let period = 'am', dates = {};
+
+const map = L.map('map', {zoomControl: false, attributionControl: true});
+L.control.zoom({position: 'bottomright'}).addTo(map);
+map.attributionControl.setPrefix('powered by Google · basemap © OpenStreetMap');
+
+// OSM tiles are the map itself and stay remote; losing them is expected in the field,
+// so the corridor redraws as a schematic rather than leaving a blank page.
+const tiles = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                          {maxZoom: 19, attribution: ''});
+let tileFails = 0;
+tiles.on('tileerror', () => {
+  if (++tileFails < 4 || !map.hasLayer(tiles)) return;
+  map.removeLayer(tiles);
+  $('state').textContent = '● map tiles unavailable — schematic view';
+});
+tiles.addTo(map);
+
+function say(msg) { $('state').textContent = msg; }
+
+(async function init() {
+  const d = await (await fetch('/api/corridor')).json();
+  if (!d.configured) {
+    say('● not configured — set corridor.enabled and google_routes.api_key in config.yaml');
+    $('period').style.display = 'none';
+    map.setView([-15.394, 28.333], 13);
+    return;
+  }
+  if (d.error) say('● glance unavailable — ' + d.error);
+
+  // The corridor draws from config whether or not the live glance answered: an
+  // uncoloured road still orients the reader.
+  const segs = d.segments || [];
+  const level = i => (segs[i] || {}).level;
+  d.road.slice(0, -1).forEach((a, i) => {
+    const lv = level(i), pts = [a, d.road[i + 1]];
+    if (lv === 2) L.polyline(pts, {color: COLOR[2], weight: 18, opacity: .22}).addTo(map);
+    L.polyline(pts, {color: lv == null ? '#5b666f' : COLOR[lv],
+                     weight: 6, opacity: .95}).addTo(map);
+  });
+  (d.cross || []).forEach(c => {
+    L.polyline(c.pts, {color: '#5b666f', weight: 3, opacity: .7, dashArray: '6 5'})
+      .addTo(map).bindPopup(esc(c.name));
+  });
+
+  // Newest analyzed day per site, so a junction popup can quote real numbers.
+  for (const r of await (await fetch('/api/ingest')).json())
+    if (!dates[r.site]) dates[r.site] = r.date;
+
+  (d.junctions || []).forEach(j => {
+    const at = d.road[j.i];
+    if (!at) return;
+    const m = L.circleMarker(at, {radius: 8, color: '#86a8cf', weight: 2,
+                                  fillColor: '#86a8cf', fillOpacity: j.site ? 1 : 0})
+      .addTo(map);
+    m.bindPopup(() => popup(j));
+    m.on('popupopen', () => fill(j, m));
+  });
+  map.fitBounds(L.latLngBounds(d.road).pad(.25));
+})();
+
+function popup(j) {
+  return `<b>${esc(j.name)}</b><br><span id="pop-${j.i}">`
+       + (j.site ? 'reading counts…' : 'planned — not yet surveyed') + '</span>';
+}
+
+async function fill(j, marker) {
+  if (!j.site || !dates[j.site]) {
+    if (j.site) marker.setPopupContent(popup(j).replace('reading counts…',
+      'no analyzed day for ' + esc(j.site) + ' yet'));
+    return;
+  }
+  const c = await (await fetch(`/api/counts/${j.site}/${dates[j.site]}`)).json();
+  const pk = (c.peaks || {})[period], p = c.qa.pairing;
+  marker.setPopupContent(`<b>${esc(j.name)}</b><br>`
+    + `${dates[j.site]} · ${esc(j.site)}<br>`
+    + (pk ? `${period.toUpperCase()} peak ${pk.start.slice(11, 16)} · ${pk.total} entering`
+          + ` · PHF ${pk.phf}<br>`
+          : `no ${period.toUpperCase()} peak in this day<br>`)
+    + `pairing ${p.rate}% (${p.inferred}% inferred)<br>`
+    + `<a href="/#/counts">open in Counts</a>`);
+}
+
+$('period').onclick = e => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  period = b.dataset.p;
+  document.querySelectorAll('#period button').forEach(x => x.classList.toggle('on', x === b));
+  map.closePopup();      // the toggle changes what a popup would say, so reopen it fresh
+};
+</script>

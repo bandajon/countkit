@@ -1,0 +1,1473 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>CountKit</title>
+<link rel="icon" href="data:,"><!-- silence the /favicon.ico request -->
+
+<style>
+  :root {
+    --bg:#111417; --panel:#191d21; --well:#0b0e10; --line:rgba(255,255,255,.14);
+    --fg:#e8eaec; --dim:#8a939b;
+    /* State only — never decoration. Used for 8px dots and text tints. */
+    --ok:#4a9e6f; --bad:#c25454; --warn:#c29a4a;
+    /* The one permitted extension: chart/diagram hues. Never on chrome. */
+    --entry:#86a8cf; --exit:#cfa886;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color-scheme: dark;   /* native checkboxes, date/time pickers and scrollbars follow */
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); -webkit-font-smoothing:antialiased;
+         font:16px/1.45 "Avenir Next", Inter, system-ui, -apple-system, sans-serif; }
+  /* Machine data is always mono + tabular so columns of numbers line up. */
+  .mono, #rail b, input, select, textarea { font-family:var(--mono); font-variant-numeric:tabular-nums; }
+
+  header { display:flex; align-items:center; gap:14px; padding:12px;
+           border-bottom:1px solid var(--line); }
+  .wordmark { font:600 15px/1 var(--mono); letter-spacing:.22em; text-transform:uppercase; }
+  /* State = a coloured dot beside neutral text. No filled pills anywhere. */
+  .state { display:inline-flex; align-items:center; gap:7px;
+           font:600 12px/1 var(--mono); letter-spacing:.06em; text-transform:uppercase; }
+  .state::before { content:''; width:8px; height:8px; border-radius:50%;
+                   background:var(--dot,var(--dim)); flex:none; }
+  .s-ok { --dot:var(--ok); } .s-bad { --dot:var(--bad); }
+  .s-warn { --dot:var(--warn); } .s-idle { --dot:var(--dim); }
+  #link { margin-left:auto; color:var(--dim); }
+
+  nav { display:flex; flex-wrap:wrap; padding:0 12px; border-bottom:1px solid var(--line); }
+  nav a { flex:1 1 45%; min-height:52px; display:flex; align-items:center;
+          justify-content:center; padding:0 16px; font-size:14px; font-weight:400;
+          letter-spacing:.08em; text-transform:uppercase; color:var(--dim);
+          text-decoration:none; border-bottom:2px solid transparent; transition:color 150ms; }
+  nav a.on { color:var(--fg); font-weight:600; border-bottom-color:var(--fg); }
+  @media (min-width:600px) { nav { flex-wrap:nowrap; } nav a { flex:1 1 0; } }
+
+  /* One line, always: on a phone the rail scrolls sideways rather than wrapping,
+     so the tabs never get pushed off the first screen. */
+  #rail { position:sticky; top:0; z-index:2; display:flex; overflow-x:auto;
+          padding:8px 12px; background:var(--bg); border-bottom:1px solid var(--line); }
+  #rail .cell { display:flex; flex-direction:column; gap:2px; flex:none;
+                padding:2px 14px; border-left:1px solid var(--line); white-space:nowrap; }
+  #rail .cell:first-child { border-left:0; padding-left:0; }
+  #rail i { font-style:normal; font-size:10px; letter-spacing:.14em;
+            text-transform:uppercase; color:var(--dim); }
+  #rail b { font:400 13px/1.3 var(--mono); }
+  #stale { display:none; padding:8px 12px; border-bottom:1px solid var(--line);
+           font:13px/1.4 var(--mono); color:var(--warn); }
+  #stale.on { display:block; }
+
+  main { padding:22px 12px 48px; }
+  section { display:none; }
+  section.on { display:block; }
+  h2 { margin:0 0 16px; font:600 11px/1 var(--mono); letter-spacing:.18em;
+       text-transform:uppercase; color:var(--dim); }
+  .empty { font:13px/1.6 var(--mono); color:var(--dim); }
+
+  .btn { min-height:48px; padding:0 18px; font-size:15px; font-weight:600; color:var(--fg);
+         background:none; border:1px solid rgba(255,255,255,.25); border-radius:4px;
+         cursor:pointer; transition:background 150ms, border-color 150ms; }
+  .btn:hover:not(:disabled) { background:rgba(255,255,255,.06); }
+  .btn:disabled { opacity:.4; cursor:not-allowed; }
+  .btn.go { background:var(--fg); border-color:var(--fg); color:var(--bg); }
+  .btn.go:hover:not(:disabled) { background:#fff; }
+  .btn.halt { border-color:var(--bad); color:var(--bad); }
+  input, select, textarea { min-height:48px; padding:0 12px; font-size:15px; color:var(--fg);
+                            background:transparent; border:1px solid rgba(255,255,255,.25);
+                            border-radius:4px; }
+  input:focus, select:focus, textarea:focus { outline:none; border-color:var(--fg); }
+  .btn:focus-visible, nav a:focus-visible, input:focus-visible, select:focus-visible,
+  textarea:focus-visible { outline:2px solid #8ab4d8; outline-offset:2px; }
+
+  /* Outcome text appears under the control that caused it — no toasts, no modals. */
+  .res { margin-top:8px; font-size:14px; color:var(--dim); white-space:pre-line; }
+  .res.bad { color:var(--bad); } .res.warn { color:var(--warn); } .res.good { color:var(--ok); }
+
+  /* --- Label tab --- */
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:4px;
+           padding:16px; margin-bottom:12px; }
+  .row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+  .row .grow { flex:1 1 160px; min-width:0; }
+  .eyebrow { font:600 11px/1 var(--mono); letter-spacing:.18em; text-transform:uppercase;
+             color:var(--dim); }
+
+  .armrow { display:flex; flex-wrap:wrap; gap:6px 12px; align-items:baseline;
+            padding:8px 0; border-top:1px solid var(--line); font:13px/1.4 var(--mono); }
+  .armrow .who { color:var(--dim); }
+  .armrow .say { flex:1 1 100%; font-size:12px; }
+  .armrow .say.warn { color:var(--warn); } .armrow .say.bad { color:var(--bad); }
+
+  #labwrap { display:flex; flex-wrap:wrap; gap:12px; align-items:flex-start; }
+  #canvascol { flex:1 1 66%; min-width:0; }
+  #canvaswrap { position:relative; background:var(--well); border:1px solid var(--line);
+                border-radius:4px; overflow:hidden; }
+  /* touch-action none: the editor owns one-finger draw and two-finger pinch itself. */
+  #gatecanvas { display:block; width:100%; touch-action:none; }
+  #framemsg { padding:20px; font:13px/1.6 var(--mono); color:var(--dim); }
+  #labside { flex:1 1 30%; min-width:260px; }
+  @media (max-width:900px) {
+    #labside { flex:1 1 100%; }
+    /* Thumb reach on a phone: the drawing controls stay on screen while the canvas scrolls. */
+    #drawbar { position:sticky; bottom:0; z-index:1; background:var(--bg);
+               padding:8px 0; border-top:1px solid var(--line); }
+  }
+  #drawbar .btn, .props .btn { flex:1 1 120px; }
+  .gate { display:flex; align-items:center; gap:9px; width:100%; margin-bottom:6px;
+          padding:10px 12px; min-height:44px; text-align:left; color:var(--fg);
+          background:none; border:1px solid var(--line); border-radius:4px;
+          font:13px/1.3 var(--mono); cursor:pointer; }
+  .gate.on { border-color:var(--fg); }
+  .gate .sw { width:10px; height:10px; border-radius:2px; flex:none; }
+  .gate .kind { color:var(--dim); text-transform:uppercase; letter-spacing:.06em; }
+  .props { display:none; margin-top:12px; padding-top:12px; border-top:1px solid var(--line); }
+  .props.on { display:block; }
+  .toggle .btn.on { background:var(--fg); border-color:var(--fg); color:var(--bg); }
+  #viewbanner { display:none; margin-bottom:12px; color:var(--warn); font:13px/1.4 var(--mono); }
+  #viewbanner.on { display:block; }
+
+  /* --- Analyze tab --- */
+  .bar { height:4px; margin:12px 0 6px; background:rgba(255,255,255,.10);
+         border-radius:2px; overflow:hidden; }
+  .bar > div { height:100%; background:var(--fg); }
+  .well { max-height:200px; overflow:auto; margin-top:8px; padding:12px;
+          background:var(--well); border:1px solid var(--line); border-radius:4px;
+          white-space:pre-wrap; font:13px/1.5 var(--mono); color:var(--dim); }
+  summary { cursor:pointer; padding:12px 0 0; font:600 11px/1 var(--mono);
+            letter-spacing:.18em; text-transform:uppercase; color:var(--dim); }
+  summary:hover { color:var(--fg); }
+
+  /* --- Counts tab --- */
+  .qa { display:flex; flex-wrap:wrap; gap:12px; }
+  .qa > div { flex:1 1 220px; }
+  .big { font:700 34px/1 var(--mono); font-variant-numeric:tabular-nums; }
+  .sub { margin-top:6px; font:13px/1.5 var(--mono); color:var(--dim); }
+  .sub .inf.hot { color:var(--warn); font-weight:700; }
+  .strip { display:flex; height:8px; margin:10px 0 4px; border-radius:2px; overflow:hidden; }
+  .strip i { display:block; }
+  .strip .rec { background:#3d5164; } .strip .gap { background:var(--bad); }
+  .probe { border:1px dashed rgba(255,255,255,.22); border-radius:4px; padding:12px; }
+  .attrib { margin-top:8px; font:10px/1.4 var(--mono); letter-spacing:.1em;
+            text-transform:uppercase; color:var(--dim); }
+  .chip { display:inline-flex; align-items:center; gap:7px; min-height:40px; margin:0 6px 6px 0;
+          padding:0 12px; font:13px/1 var(--mono); color:var(--fg); background:none;
+          border:1px solid rgba(255,255,255,.25); border-radius:4px; cursor:pointer; }
+  .chip.unset { border-color:var(--bad); color:var(--bad); }
+
+  .tblwrap { overflow-x:auto; }
+  table.bins { border-collapse:collapse; font:13px/1.3 var(--mono);
+               font-variant-numeric:tabular-nums; }
+  table.bins th, table.bins td { padding:6px 10px; border-bottom:1px solid var(--line);
+                                 text-align:right; white-space:nowrap; }
+  table.bins th.arm { text-align:center; border-bottom:2px solid currentColor; }
+  /* The bin column stays put when three or more arms push the table sideways. */
+  table.bins .binc { position:sticky; left:0; z-index:1; text-align:left;
+                     background:var(--panel); }
+  table.bins tr.peak td { background:rgba(255,255,255,.055); font-weight:600; }
+  table.bins tr.peak .binc { background:#1f2429; }
+  table.bins tfoot td { color:var(--dim); border-bottom:0; }
+  /* A gap is not a zero: hatching says "no footage", an empty cell would lie. */
+  td.gap { background:repeating-linear-gradient(45deg,#2a2420 0 3px,#191d21 3px 6px); }
+
+  .od { border-collapse:collapse; font:13px/1.3 var(--mono); }
+  .od th, .od td { padding:8px 12px; border:1px solid var(--line); text-align:right; }
+  .od th { color:var(--dim); font-weight:400; }
+  .od td.cell { cursor:pointer; }
+  .od td.cell:hover { background:rgba(255,255,255,.06); }
+  .od .inf { display:block; font-size:11px; color:var(--dim); }
+  .od td.diag { color:var(--dim); }
+  .seg { display:inline-flex; }
+  .seg .btn { border-radius:0; margin-left:-1px; min-height:40px; font-size:13px; }
+  .seg .btn:first-child { border-radius:4px 0 0 4px; margin-left:0; }
+  .seg .btn:last-child { border-radius:0 4px 4px 0; }
+  .seg .btn.on { background:var(--fg); border-color:var(--fg); color:var(--bg); }
+
+  .mv { display:flex; flex-wrap:wrap; gap:12px; align-items:center;
+        padding:10px 0; border-top:1px solid var(--line); }
+  .mv img, .mv .nocrop { height:96px; border:1px solid var(--line); border-radius:2px; }
+  .mv .nocrop { display:flex; align-items:center; width:128px; padding:8px;
+                font:11px/1.35 var(--mono); color:var(--dim); background:var(--well); }
+  .mv figure { margin:0; }
+  .mv figcaption { margin-top:4px; font:11px/1.3 var(--mono); color:var(--dim); }
+  .mv figcaption .prov { letter-spacing:.08em; text-transform:uppercase; opacity:.75; }
+  .internal { font:10px/1 var(--mono); letter-spacing:.14em; text-transform:uppercase;
+              color:var(--warn); }
+
+  @media (prefers-reduced-motion: reduce) { * { transition:none !important; } }
+</style>
+</head>
+<body>
+
+<header>
+  <span class="wordmark">CountKit</span>
+  <span class="state s-idle" id="link">no contact</span>
+</header>
+
+<nav>
+  <a href="#/label">Label</a>
+  <a href="#/analyze">Analyze</a>
+  <a href="#/counts">Counts</a>
+  <a href="#/report">Report</a>
+</nav>
+
+<div id="rail">
+  <span class="cell"><i>host</i><b id="r-host">…</b></span>
+  <span class="cell"><i>ingest disk free</i><b id="r-disk">…</b></span>
+  <span class="cell"><i>gpu</i><b id="r-gpu">—</b></span>
+  <span class="cell"><i>job</i><b id="r-job">—</b></span>
+  <span class="cell"><i>clock</i><b id="r-clock">—</b></span>
+</div>
+<div id="stale"></div>
+
+<main>
+  <section id="label">
+    <div class="panel">
+      <div class="row">
+        <span class="eyebrow grow">arm map</span>
+        <span class="state s-idle" id="armstate">no calibrations</span>
+      </div>
+      <div id="armrows"></div>
+      <div id="armnotes" class="res"></div>
+    </div>
+
+    <div class="panel">
+      <div class="row">
+        <select id="l-site" class="grow" aria-label="site"></select>
+        <select id="l-cam" class="grow" aria-label="camera"></select>
+        <select id="l-ver" class="grow" aria-label="calibration version"></select>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <span class="eyebrow grow" id="l-verinfo">no calibration yet</span>
+        <button class="btn" id="l-activate" hidden>Activate this version</button>
+        <button class="btn go" id="l-save">Save as new version</button>
+      </div>
+      <div id="l-res" class="res"></div>
+    </div>
+
+    <div id="viewbanner"></div>
+
+    <div id="labwrap">
+      <div id="canvascol">
+        <div id="canvaswrap">
+          <canvas id="gatecanvas" width="16" height="9"></canvas>
+          <div id="framemsg" hidden></div>
+        </div>
+        <div class="row" id="drawbar" style="margin-top:10px">
+          <span class="row toggle" style="gap:0">
+            <button class="btn on" id="m-draw" style="border-radius:4px 0 0 4px">Draw</button>
+            <button class="btn" id="m-pan" style="border-radius:0 4px 4px 0">Pan</button>
+          </span>
+          <button class="btn" id="g-entry">+ Entry gate</button>
+          <button class="btn" id="g-exit">+ Exit gate</button>
+          <button class="btn" id="g-undo" disabled>Undo pt</button>
+          <button class="btn" id="g-done" disabled>Done</button>
+          <button class="btn" id="z-out" aria-label="zoom out">−</button>
+          <button class="btn" id="z-in" aria-label="zoom in">+</button>
+          <button class="btn" id="z-fit">Fit</button>
+        </div>
+        <div id="drawhint" class="res">pick a site and camera to start</div>
+      </div>
+
+      <aside id="labside" class="panel">
+        <div class="eyebrow" style="margin-bottom:10px">gates</div>
+        <div id="gatelist"><p class="empty">no gates on this camera yet</p></div>
+        <div class="props" id="props">
+          <div class="row toggle" style="gap:0;margin-bottom:8px">
+            <button class="btn" id="k-entry" style="border-radius:4px 0 0 4px">Entry</button>
+            <button class="btn" id="k-exit" style="border-radius:0 4px 4px 0">Exit</button>
+          </div>
+          <div class="row" style="margin-bottom:8px">
+            <input id="p-name" class="grow" placeholder="arm name e.g. Great East Rd">
+            <select id="p-compass" aria-label="compass tag">
+              <option value="">—</option><option>N</option><option>S</option>
+              <option>E</option><option>W</option>
+            </select>
+          </div>
+          <div class="row">
+            <button class="btn" id="p-flip">Flip direction</button>
+            <button class="btn halt" id="p-del">Delete gate</button>
+          </div>
+          <div class="res" id="p-dir"></div>
+        </div>
+      </aside>
+    </div>
+  </section>
+  <section id="analyze">
+    <div class="panel">
+      <div class="eyebrow" style="margin-bottom:10px">site-days</div>
+      <div id="daylist"><p class="empty">reading the ingest tree…</p></div>
+    </div>
+    <div class="eyebrow" style="margin:18px 0 10px">queue</div>
+    <div id="joblist"><p class="empty">no jobs yet · queue a verified site-day above</p></div>
+  </section>
+  <section id="counts">
+    <div class="row" style="margin-bottom:12px">
+      <select id="c-day" class="grow" aria-label="site-day"></select>
+      <select id="c-class" aria-label="class filter"><option value="">all classes</option></select>
+      <button class="btn" id="c-pcu">PCU off</button>
+      <a class="btn" id="c-corridor" href="/corridor" hidden>Corridor map</a>
+    </div>
+
+    <div class="panel qa" id="qa">
+      <p class="empty">pick an analyzed site-day</p>
+    </div>
+
+    <div class="eyebrow" style="margin:18px 0 8px">15-minute bins · entry crossings</div>
+    <div class="panel tblwrap"><table class="bins" id="bintable"></table></div>
+
+    <div class="eyebrow" style="margin:18px 0 8px">per-approach profile</div>
+    <div class="panel" id="sparks"></div>
+
+    <div class="row" style="margin:18px 0 8px">
+      <span class="eyebrow grow">turning movements</span>
+      <span class="seg" id="c-period">
+        <button class="btn" data-p="am">AM peak</button>
+        <button class="btn" data-p="pm">PM peak</button>
+        <button class="btn on" data-p="day">Day</button>
+      </span>
+    </div>
+    <div class="panel tblwrap"><table class="od" id="odtable"></table></div>
+
+    <div class="panel" id="drawer" hidden>
+      <div class="row">
+        <span class="eyebrow">verification</span>
+        <span class="grow mono" id="dr-title"></span>
+        <span class="internal">internal qa</span>
+        <button class="btn" id="dr-close">Close</button>
+      </div>
+      <div class="sub">view only — flagging records a QA note and never changes a count</div>
+      <div id="dr-rows"></div>
+    </div>
+  </section>
+  <section id="report">
+    <div class="row" style="margin-bottom:12px">
+      <select id="r-day" class="grow" aria-label="site-day"></select>
+    </div>
+    <div class="panel" id="rcard">
+      <p class="empty">nothing to export yet · counts must exist before a report can be built</p>
+    </div>
+    <div class="row">
+      <button class="btn go" id="r-go" disabled>Export Excel + PDF</button>
+      <span id="r-files" class="row"></span>
+    </div>
+    <div class="res" id="r-res"></div>
+  </section>
+</main>
+
+<script>
+const TABS = ['label', 'analyze', 'counts', 'report'];
+const $ = id => document.getElementById(id);
+
+function route() {
+  const tab = TABS.includes(location.hash.slice(2)) ? location.hash.slice(2) : TABS[0];
+  document.querySelectorAll('nav a').forEach(a => a.classList.toggle('on', a.hash === '#/' + tab));
+  document.querySelectorAll('section').forEach(s => s.classList.toggle('on', s.id === tab));
+}
+addEventListener('hashchange', route);
+route();
+
+// The clock is local to the site, not to the laptop: an operator reviewing from
+// another timezone still reads Africa/Lusaka, which is what every bin is stamped in.
+const CAT = new Intl.DateTimeFormat('en-GB', {
+  timeZone: 'Africa/Lusaka', hour12: false,
+  hour: '2-digit', minute: '2-digit', second: '2-digit' });
+setInterval(() => { $('r-clock').textContent = CAT.format(new Date()) + ' CAT'; }, 1000);
+
+let lastOk = '';
+async function refreshStatus() {
+  try {
+    const s = await (await fetch('/api/status')).json();
+    $('r-host').textContent = s.hostname;
+    $('r-disk').textContent = s.disk_free_gb + ' GB';
+    $('r-gpu').textContent = s.gpu && s.gpu.temp_c != null ? s.gpu.temp_c + ' °C' : '—';
+    $('r-job').textContent = s.active_job || '—';
+    lastOk = CAT.format(new Date());
+    $('link').textContent = 'link ok';
+    $('link').className = 'state s-ok';
+    $('stale').className = '';
+  } catch (e) {
+    // A dropped field network is not a failed job: say so, and keep the last numbers
+    // on screen rather than blanking them out.
+    $('link').textContent = 'no contact';
+    $('link').className = 'state s-warn';
+    $('stale').textContent = '● showing last known state · ' + (lastOk || 'never connected')
+                           + ' · running jobs are unaffected';
+    $('stale').className = 'on';
+  }
+}
+refreshStatus();
+setInterval(refreshStatus, 5000);
+
+// ---------------- Label tab: gate calibration editor ----------------
+// Points are stored in IMAGE coordinates and converted per paint, so zooming and
+// panning can never drift what gets saved.
+const LAB = {
+  sites: {}, site: '', cam: '',
+  img: null, work: null, view: null, viewing: null,
+  versions: [], sel: -1, draw: null,
+  mode: 'draw', z: 1, ox: 0, oy: 0, dirty: false,
+};
+const CAN = $('gatecanvas');
+const HUE = k => getComputedStyle(document.documentElement).getPropertyValue(k).trim();
+const MONO = '12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+const doc_ = () => LAB.view || LAB.work;
+const ro = () => LAB.view !== null;                      // viewing an older version
+// offsetX/offsetY are relative to whatever box the browser last laid out and go wrong
+// once the page is scrolled; the bounding rect is the only reliable canvas origin.
+const at = e => { const r = CAN.getBoundingClientRect();
+                  return [e.clientX - r.left, e.clientY - r.top]; };
+const i2s = p => [p[0] * LAB.z + LAB.ox, p[1] * LAB.z + LAB.oy];
+const s2i = (x, y) => [(x - LAB.ox) / LAB.z, (y - LAB.oy) / LAB.z];
+const mid = (a, b) => [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+const TOL = () => matchMedia('(pointer: coarse)').matches ? 20 : 12;
+
+function paint() {
+  const dpr = devicePixelRatio || 1, w = CAN.clientWidth, h = CAN.clientHeight;
+  CAN.width = w * dpr; CAN.height = h * dpr;      // also picks up any resize, for free
+  const g = CAN.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+  if (LAB.img) g.drawImage(LAB.img, LAB.ox, LAB.oy,
+                           LAB.img.naturalWidth * LAB.z, LAB.img.naturalHeight * LAB.z);
+  const d = doc_();
+  if (d) d.lines.forEach((ln, i) => gate(g, ln, i === LAB.sel && !ro()));
+  if (LAB.draw) pending(g);
+}
+
+function gate(g, ln, on) {
+  const hue = ln.kind === 'entry' ? HUE('--entry') : HUE('--exit');
+  const pts = ln.points.map(i2s);
+  g.lineJoin = g.lineCap = 'round';
+  g.strokeStyle = hue; g.lineWidth = on ? 5 : 3.5;
+  g.beginPath(); pts.forEach((p, i) => i ? g.lineTo(p[0], p[1]) : g.moveTo(p[0], p[1]));
+  g.stroke();
+  for (let i = 1; i < pts.length; i++) chevron(g, pts[i - 1], pts[i], ln.dir, hue);
+  if (on) {
+    pts.forEach(p => dot(g, p, hue, 11));
+    for (let i = 1; i < pts.length; i++) plus(g, mid(pts[i - 1], pts[i]), hue);
+  }
+  chip(g, pts, ln, hue);
+}
+
+// Convention (kept in step with the FLIP button): dir 'AB' means the side that counts
+// as crossing IN is the LEFT of travel from the first point to the last. Screen y grows
+// downward, so left of (dx,dy) is (dy,-dx). 'BA' is the same line walked backwards.
+function chevron(g, a, b, dir, hue) {
+  const dx = b[0] - a[0], dy = b[1] - a[1], L = Math.hypot(dx, dy) || 1;
+  const s = dir === 'AB' ? 1 : -1;
+  const nx = s * dy / L, ny = -s * dx / L, tx = dx / L, ty = dy / L;
+  const m = mid(a, b), tip = [m[0] + nx * 18, m[1] + ny * 18];
+  g.strokeStyle = hue; g.lineWidth = 2.5; g.beginPath();
+  g.moveTo(tip[0] - nx * 9 - tx * 7, tip[1] - ny * 9 - ty * 7);
+  g.lineTo(tip[0], tip[1]);
+  g.lineTo(tip[0] - nx * 9 + tx * 7, tip[1] - ny * 9 + ty * 7);
+  g.stroke();
+}
+
+function dot(g, p, hue, r) {
+  g.beginPath(); g.arc(p[0], p[1], r, 0, 7);
+  g.fillStyle = '#0b0e10'; g.fill();
+  g.strokeStyle = hue; g.lineWidth = 2; g.stroke();
+}
+
+function plus(g, m, hue) {
+  g.strokeStyle = hue; g.lineWidth = 2; g.beginPath();
+  g.moveTo(m[0] - 5, m[1]); g.lineTo(m[0] + 5, m[1]);
+  g.moveTo(m[0], m[1] - 5); g.lineTo(m[0], m[1] + 5); g.stroke();
+}
+
+function chip(g, pts, ln, hue) {
+  const i = Math.max(1, Math.floor(pts.length / 2)), m = mid(pts[i - 1], pts[i]);
+  const t = (ln.name || 'unnamed') + (ln.compass ? ' (' + ln.compass + ')' : '');
+  g.font = MONO;
+  const w = g.measureText(t).width + 12, x = m[0] - w / 2, y = m[1] - 26;
+  g.fillStyle = '#0b0e10'; g.fillRect(x, y, w, 19);
+  g.strokeStyle = hue; g.lineWidth = 1; g.strokeRect(x, y, w, 19);
+  g.fillStyle = hue; g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillText(t, m[0], y + 10);
+  g.textAlign = 'start'; g.textBaseline = 'alphabetic';
+}
+
+function pending(g) {
+  const hue = LAB.draw.kind === 'entry' ? HUE('--entry') : HUE('--exit');
+  const pts = LAB.draw.points.map(i2s);
+  g.strokeStyle = hue; g.lineWidth = 3.5; g.setLineDash([]);
+  if (pts.length > 1) {
+    g.beginPath(); pts.forEach((p, i) => i ? g.lineTo(p[0], p[1]) : g.moveTo(p[0], p[1]));
+    g.stroke();
+  }
+  if (pts.length && LAB.draw.hover) {          // dashed rubber band to the pointer
+    g.setLineDash([6, 5]); g.beginPath();
+    g.moveTo(pts[pts.length - 1][0], pts[pts.length - 1][1]);
+    g.lineTo(LAB.draw.hover[0], LAB.draw.hover[1]); g.stroke(); g.setLineDash([]);
+  }
+  pts.forEach(p => dot(g, p, hue, 6));
+}
+
+function distSeg(p, a, b) {
+  const dx = b[0] - a[0], dy = b[1] - a[1], L2 = dx * dx + dy * dy;
+  const t = L2 ? Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / L2)) : 0;
+  return Math.hypot(p[0] - (a[0] + t * dx), p[1] - (a[1] + t * dy));
+}
+
+function hitGate(x, y) {
+  const d = doc_(); let best = -1, bd = TOL();
+  (d ? d.lines : []).forEach((ln, i) => {
+    const pts = ln.points.map(i2s);
+    for (let k = 1; k < pts.length; k++) {
+      const dist = distSeg([x, y], pts[k - 1], pts[k]);
+      if (dist < bd) { bd = dist; best = i; }
+    }
+  });
+  return best;
+}
+
+function hitVertex(x, y) {
+  if (LAB.sel < 0) return -1;
+  const pts = doc_().lines[LAB.sel].points.map(i2s);
+  for (let i = 0; i < pts.length; i++)
+    if (Math.hypot(x - pts[i][0], y - pts[i][1]) <= 22) return i;   // 44px hit area
+  return -1;
+}
+
+function hitPlus(x, y) {
+  if (LAB.sel < 0) return -1;
+  const pts = doc_().lines[LAB.sel].points.map(i2s);
+  for (let i = 1; i < pts.length; i++) {
+    const m = mid(pts[i - 1], pts[i]);
+    if (Math.hypot(x - m[0], y - m[1]) <= 16) return i;
+  }
+  return -1;
+}
+
+// ---- pointer input: one finger acts in the current mode, two always pan/zoom ----
+const ptrs = new Map();
+let down = null, pinch = null;
+
+function zoomAt(x, y, f) {
+  const [ix, iy] = s2i(x, y);
+  LAB.z = Math.min(8, Math.max(0.05, LAB.z * f));
+  LAB.ox = x - ix * LAB.z; LAB.oy = y - iy * LAB.z;
+  LAB.moved = true; paint();
+}
+
+function fit() {
+  if (!LAB.img) return;
+  const w = $('canvaswrap').clientWidth;
+  CAN.style.height = Math.round(w * LAB.img.naturalHeight / LAB.img.naturalWidth) + 'px';
+  LAB.z = w / LAB.img.naturalWidth; LAB.ox = LAB.oy = 0; LAB.moved = false;
+  paint();
+}
+
+// The canvas is laid out before the frame arrives, so fitting once during load races the
+// reflow. Refit on every width change until the operator zooms or pans, then leave it be.
+let lastW = 0;
+new ResizeObserver(() => {
+  const w = $('canvaswrap').clientWidth;
+  if (w === lastW) return;                     // our own height write must not re-trigger
+  lastW = w;
+  LAB.moved ? paint() : fit();
+}).observe($('canvaswrap'));
+
+CAN.onpointerdown = e => {
+  const [x, y] = at(e);
+  // Throws if the pointer is already gone; capture is an optimisation, not the mechanism.
+  try { CAN.setPointerCapture(e.pointerId); } catch (err) { /* keep drawing */ }
+  ptrs.set(e.pointerId, [x, y]);
+  if (ptrs.size > 1) { down = null; pinch = null; return; }
+  down = { x, y, moved: false, drag: -1 };
+  if (!ro() && LAB.mode === 'draw' && !LAB.draw) down.drag = hitVertex(x, y);
+};
+
+CAN.onpointermove = e => {
+  const [ex, ey] = at(e);
+  if (ptrs.has(e.pointerId)) ptrs.set(e.pointerId, [ex, ey]);
+  if (ptrs.size > 1) {
+    const [a, b] = [...ptrs.values()];
+    const d = Math.hypot(a[0] - b[0], a[1] - b[1]), m = mid(a, b);
+    if (pinch) {
+      LAB.ox += m[0] - pinch.m[0]; LAB.oy += m[1] - pinch.m[1];
+      zoomAt(m[0], m[1], d / (pinch.d || d));
+    }
+    pinch = { d, m };
+    return;
+  }
+  if (LAB.draw && LAB.draw.points.length && !down) {
+    LAB.draw.hover = [ex, ey]; paint(); return;
+  }
+  if (!down) return;
+  if (Math.hypot(ex - down.x, ey - down.y) > 6) down.moved = true;
+  if (down.drag >= 0) {
+    doc_().lines[LAB.sel].points[down.drag] = s2i(ex, ey).map(Math.round);
+    touch(); paint();
+  } else if (down.moved && (LAB.mode === 'pan' || ro())) {
+    LAB.ox += ex - down.x; LAB.oy += ey - down.y;
+    down.x = ex; down.y = ey; LAB.moved = true; paint();
+  }
+};
+
+CAN.onpointerup = CAN.onpointercancel = e => {
+  ptrs.delete(e.pointerId);
+  if (ptrs.size < 2) pinch = null;
+  const d = down; down = null;
+  if (!d || d.moved || d.drag >= 0 || ro() || LAB.mode !== 'draw') return;
+  if (LAB.draw) {                                   // placing vertices
+    LAB.draw.points.push(s2i(d.x, d.y).map(Math.round));
+    LAB.draw.hover = null; drawbar(); paint(); return;
+  }
+  const at = hitPlus(d.x, d.y);
+  if (at > 0) {                                     // '+' inserts a vertex mid-segment
+    const pts = doc_().lines[LAB.sel].points;
+    pts.splice(at, 0, s2i(d.x, d.y).map(Math.round));
+    touch(); paint(); return;
+  }
+  select(hitGate(d.x, d.y));
+};
+
+// Trackpad pinch arrives as a ctrlKey wheel. A plain wheel must stay page scroll — the
+// panels above the canvas are otherwise unreachable once the pointer is over the frame.
+CAN.onwheel = e => {
+  if (!e.ctrlKey && !e.metaKey) return;
+  e.preventDefault();
+  const [x, y] = at(e);
+  zoomAt(x, y, e.deltaY < 0 ? 1.12 : 1 / 1.12);
+};
+CAN.ondblclick = () => finish();
+addEventListener('keydown', e => {
+  // Same default as route(): an empty hash IS the Label tab.
+  const tab = TABS.includes(location.hash.slice(2)) ? location.hash.slice(2) : TABS[0];
+  if (tab !== 'label' || !LAB.draw) return;
+  if (e.key === 'Escape') { LAB.draw = null; drawbar(); paint(); }
+  if (e.key === 'Enter') finish();
+});
+
+// ---- editing ----
+function touch() { LAB.dirty = true; $('l-res').textContent = ''; drawbar(); }
+
+function begin(kind) {
+  if (ro()) return;
+  LAB.draw = { kind, points: [], hover: null };
+  select(-1); drawbar(); paint();
+}
+
+function finish() {
+  if (!LAB.draw || LAB.draw.points.length < 2) return;
+  LAB.work.lines.push({ kind: LAB.draw.kind, name: '', compass: '',
+                        points: LAB.draw.points, dir: 'AB' });
+  LAB.draw = null;
+  select(LAB.work.lines.length - 1);
+  touch(); paint();
+}
+
+function select(i) { LAB.sel = i; gatelist(); paint(); }
+
+function drawbar() {
+  const n = LAB.draw ? LAB.draw.points.length : 0;
+  $('g-undo').disabled = !n;
+  $('g-done').disabled = n < 2;
+  $('g-entry').disabled = $('g-exit').disabled = !!LAB.draw || ro() || !LAB.work;
+  $('drawhint').textContent = LAB.draw
+    ? `drawing ${LAB.draw.kind} gate · ${n} point${n === 1 ? '' : 's'} · Done needs 2+ · Esc cancels`
+    : 'tap a gate to select · pinch, ctrl+wheel or the zoom buttons to magnify';
+  $('l-res').classList.toggle('warn', LAB.dirty);
+  if (LAB.dirty && !$('l-res').textContent) $('l-res').textContent = 'unsaved changes';
+}
+
+function gatelist() {
+  const d = doc_(), box = $('gatelist');
+  if (!d || !d.lines.length) {
+    box.innerHTML = '<p class="empty">no gates on this camera yet</p>';
+    $('props').className = 'props'; return;
+  }
+  box.innerHTML = '';
+  d.lines.forEach((ln, i) => {
+    const b = document.createElement('button');
+    b.className = 'gate' + (i === LAB.sel ? ' on' : '');
+    b.innerHTML = `<span class="sw"></span><span class="kind">${ln.kind}</span>`
+                + `<span>${(ln.name || 'unnamed').replace(/</g, '&lt;')}`
+                + `${ln.compass ? ' (' + ln.compass + ')' : ''}</span>`;
+    b.querySelector('.sw').style.background = ln.kind === 'entry' ? 'var(--entry)' : 'var(--exit)';
+    b.onclick = () => select(i);
+    box.appendChild(b);
+  });
+  const ln = d.lines[LAB.sel];
+  $('props').className = 'props' + (ln && !ro() ? ' on' : '');
+  if (!ln) return;
+  $('k-entry').classList.toggle('on', ln.kind === 'entry');
+  $('k-exit').classList.toggle('on', ln.kind === 'exit');
+  $('p-name').value = ln.name || '';
+  $('p-compass').value = ln.compass || '';
+  $('p-dir').textContent = `dir ${ln.dir} · chevron points the way counted traffic travels`;
+}
+
+$('m-draw').onclick = () => { LAB.mode = 'draw'; $('m-draw').classList.add('on'); $('m-pan').classList.remove('on'); };
+$('m-pan').onclick = () => { LAB.mode = 'pan'; LAB.draw = null; $('m-pan').classList.add('on'); $('m-draw').classList.remove('on'); drawbar(); paint(); };
+$('g-entry').onclick = () => begin('entry');
+$('g-exit').onclick = () => begin('exit');
+$('g-undo').onclick = () => { if (LAB.draw) { LAB.draw.points.pop(); drawbar(); paint(); } };
+$('g-done').onclick = () => finish();
+const zc = f => zoomAt(CAN.clientWidth / 2, CAN.clientHeight / 2, f);   // zoom about the middle
+$('z-in').onclick = () => zc(1.25);
+$('z-out').onclick = () => zc(1 / 1.25);
+$('z-fit').onclick = () => fit();
+$('k-entry').onclick = () => { doc_().lines[LAB.sel].kind = 'entry'; touch(); gatelist(); paint(); };
+$('k-exit').onclick = () => { doc_().lines[LAB.sel].kind = 'exit'; touch(); gatelist(); paint(); };
+$('p-name').oninput = () => { doc_().lines[LAB.sel].name = $('p-name').value; touch(); paint(); };
+$('p-compass').onchange = () => { doc_().lines[LAB.sel].compass = $('p-compass').value; touch(); paint(); };
+$('p-flip').onclick = () => {
+  const ln = doc_().lines[LAB.sel];
+  ln.dir = ln.dir === 'AB' ? 'BA' : 'AB';
+  touch(); gatelist(); paint();
+};
+$('p-del').onclick = () => {
+  const ln = doc_().lines[LAB.sel];
+  if (!confirm(`Delete the ${ln.kind} gate "${ln.name || 'unnamed'}"?`)) return;
+  doc_().lines.splice(LAB.sel, 1);
+  touch(); select(-1);
+};
+
+// ---- loading ----
+const detail = async r => { try { return (await r.json()).detail; } catch (e) { return r.statusText; } };
+const keep = () => !LAB.dirty || confirm('Discard unsaved gate changes?');
+
+async function labInit() {
+  const rows = await (await fetch('/api/ingest')).json().catch(() => []);
+  LAB.sites = {};
+  rows.forEach(r => { (LAB.sites[r.site] = LAB.sites[r.site] || new Set()); r.cams.forEach(c => LAB.sites[r.site].add(c)); });
+  const sites = Object.keys(LAB.sites).sort();
+  $('l-site').innerHTML = sites.map(s => `<option>${s}</option>`).join('')
+                       || '<option value="">no footage in the ingest tree yet</option>';
+  LAB.site = sites[0] || '';
+  await siteChanged();
+}
+
+async function siteChanged() {
+  LAB.site = $('l-site').value || LAB.site;
+  const cams = [...(LAB.sites[LAB.site] || [])].sort();
+  $('l-cam').innerHTML = cams.map(c => `<option>${c}</option>`).join('') || '<option value="">—</option>';
+  LAB.cam = cams[0] || '';
+  await armmap();
+  await camChanged();
+}
+
+async function camChanged() {
+  LAB.cam = $('l-cam').value || LAB.cam;
+  LAB.work = LAB.view = LAB.viewing = null;
+  LAB.sel = -1; LAB.draw = null; LAB.dirty = false;
+  $('l-res').textContent = ''; $('viewbanner').className = ''; $('l-activate').hidden = true;
+  if (!LAB.site || !LAB.cam) { $('framemsg').hidden = false; $('framemsg').textContent =
+    'no cameras yet — pull footage with FieldKit first'; return; }
+  await frame();
+  await calibration();
+  await versions();
+  drawbar(); gatelist(); paint();
+}
+
+async function frame() {
+  const wrap = $('canvaswrap'), msg = $('framemsg');
+  LAB.img = null; msg.hidden = true; CAN.hidden = false;
+  const r = await fetch(`/api/frame/${LAB.site}/${LAB.cam}`);
+  if (!r.ok) {
+    CAN.hidden = true; msg.hidden = false;
+    msg.textContent = await detail(r);
+    const lab = document.createElement('label');
+    lab.style.cssText = 'display:block;margin-top:14px';
+    lab.textContent = 'Upload reference photo (JPEG) ';
+    const f = document.createElement('input');
+    f.type = 'file'; f.accept = 'image/jpeg';
+    f.onchange = async () => {
+      const up = await fetch(`/api/frame/${LAB.site}/${LAB.cam}`,
+                             { method: 'POST', body: f.files[0] });
+      if (!up.ok) { msg.textContent = await detail(up); return; }
+      await camChanged();
+    };
+    lab.appendChild(f); msg.appendChild(lab);
+    return;
+  }
+  const img = new Image();
+  img.src = URL.createObjectURL(await r.blob());
+  await img.decode();
+  URL.revokeObjectURL(img.src);   // decoded bitmap survives; the blob need not
+  LAB.img = img;
+  CAN.style.height = Math.round(wrap.clientWidth * img.naturalHeight / img.naturalWidth) + 'px';
+  LAB.z = wrap.clientWidth / img.naturalWidth; LAB.ox = LAB.oy = 0;   // fit to view
+}
+
+async function calibration() {
+  const r = await fetch(`/api/calib/${LAB.site}/${LAB.cam}`);
+  const size = LAB.img ? [LAB.img.naturalWidth, LAB.img.naturalHeight] : [1920, 1080];
+  LAB.work = r.ok ? await r.json() : { image_size: size, lines: [] };
+}
+
+async function versions() {
+  LAB.versions = await (await fetch(`/api/calib/${LAB.site}/${LAB.cam}/versions`)).json();
+  const act = LAB.versions.find(v => v.active);
+  $('l-ver').innerHTML = '<option value="">working copy (active)</option>'
+    + LAB.versions.map(v => `<option value="${v.version}">v${v.version}${v.active ? ' · active' : ''}</option>`).join('');
+  $('l-ver').value = '';
+  $('l-verinfo').textContent = act
+    ? `calibration v${act.version} · active · saved ${act.saved.replace('T', ' ')}`
+    : 'no calibration yet';
+}
+
+$('l-ver').onchange = async () => {
+  const v = $('l-ver').value;
+  if (!v) { LAB.view = LAB.viewing = null; $('viewbanner').className = ''; $('l-activate').hidden = true; }
+  else {
+    LAB.viewing = +v;
+    LAB.view = await (await fetch(`/api/calib/${LAB.site}/${LAB.cam}?version=${v}`)).json();
+    $('viewbanner').textContent = `viewing v${v} — read-only. Activate it to make it the one`
+      + ' analysis uses, or switch back to the working copy to keep editing.';
+    $('viewbanner').className = 'on';
+    $('l-activate').hidden = false;
+  }
+  LAB.sel = -1; LAB.draw = null; drawbar(); gatelist(); paint();
+};
+
+$('l-activate').onclick = async () => {
+  const r = await fetch(`/api/calib/${LAB.site}/${LAB.cam}/activate`,
+    { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ version: LAB.viewing }) });
+  $('l-res').textContent = r.ok ? `v${LAB.viewing} is now the active calibration`
+                                : await detail(r);
+  $('l-res').className = 'res ' + (r.ok ? 'good' : 'bad');
+  if (r.ok) { $('l-ver').value = ''; await $('l-ver').onchange(); await versions(); await armmap(); }
+};
+
+$('l-save').onclick = async () => {
+  const r = await fetch(`/api/calib/${LAB.site}/${LAB.cam}`,
+    { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(LAB.work) });
+  const body = await r.json();
+  $('l-res').className = 'res ' + (r.ok ? 'good' : 'bad');
+  if (!r.ok) { $('l-res').textContent = body.detail; return; }
+  LAB.dirty = false;
+  $('l-res').textContent = `saved as v${body.version} — active from now on`;
+  renderArmmap(body.armmap);
+  await versions();
+};
+
+// A re-aim mid-survey needs its own version, so switching away with unsaved work asks.
+$('l-site').onchange = async () => { if (keep()) await siteChanged(); else $('l-site').value = LAB.site; };
+$('l-cam').onchange = async () => { if (keep()) await camChanged(); else $('l-cam').value = LAB.cam; };
+
+async function armmap() {
+  if (!LAB.site) return;
+  renderArmmap(await (await fetch(`/api/calib/${LAB.site}/armmap`)).json());
+}
+
+function renderArmmap(m) {
+  const rows = $('armrows'), st = $('armstate');
+  rows.innerHTML = '';
+  m.arms.forEach(a => {
+    const cls = { owned: 's-ok', unowned: 's-warn', double: 's-bad' }[a.state];
+    const say = { owned: 'OWNED',
+                  unowned: "UNOWNED — its movements can't be counted",
+                  double: 'DOUBLE-OWNED — vehicles here count twice; remove one line' }[a.state];
+    const d = document.createElement('div');
+    d.className = 'armrow';
+    d.innerHTML = `<span class="state ${cls}">${a.state}</span>`
+      + `<span>${a.arm.replace(/</g, '&lt;')}${a.compass ? ' (' + a.compass + ')' : ''}</span>`
+      + `<span class="who">entry: ${a.entry.join(' + ') || '—'} · exit: ${a.exit.join(' + ') || '—'}</span>`
+      + `<span class="say ${a.state === 'double' ? 'bad' : a.state === 'unowned' ? 'warn' : ''}">${say}</span>`;
+    rows.appendChild(d);
+  });
+  $('armnotes').textContent = m.notes.map(n => `${n.cam}: ${n.note}`).join('\n');
+  const bad = m.arms.filter(a => a.state !== 'owned').length;
+  st.className = 'state ' + (!m.arms.length ? 's-idle' : bad ? 's-bad' : 's-ok');
+  st.textContent = !m.arms.length ? 'no calibrations'
+                 : bad ? `${bad} arm${bad === 1 ? ' needs' : 's need'} attention` : 'fully covered';
+}
+
+labInit();   // the ResizeObserver above already covers window resizes
+
+// ---------------- Analyze tab: site-day browser + job queue ----------------
+const post = (url, body) => fetch(url, {method: 'POST',
+  headers: {'content-type': 'application/json'}, body: JSON.stringify(body)});
+
+async function days() {
+  const rows = await (await fetch('/api/ingest')).json();
+  const box = $('daylist');
+  if (!rows.length) {
+    box.innerHTML = '<p class="empty">nothing in the ingest tree yet</p>'; return;
+  }
+  box.innerHTML = '';
+  for (const r of rows) {
+    const st = await (await fetch(`/api/analyze/status/${r.site}/${r.date}`)).json();
+    const d = document.createElement('div');
+    d.className = 'armrow';
+    const dot = st.blocked ? 's-bad' : st.events ? 's-ok' : 's-ok';
+    const word = st.blocked ? 'blocked' : st.events ? 'analyzed' : 'verified';
+    d.innerHTML = `<span class="state ${dot}">${word}</span>`
+      + `<span>${r.date} · ${r.site}</span>`
+      + `<span class="who">${r.cams.join(' ')}`
+      + `${st.events ? ' · ' + st.events + ' events' : ''}</span>`;
+    const b = document.createElement('button');
+    b.className = 'btn'; b.style.marginLeft = 'auto';
+    b.textContent = st.events ? 'Re-run' : 'Queue';
+    b.disabled = !!st.blocked;
+    b.onclick = async () => {
+      const r2 = await post('/api/analyze/queue', {site: r.site, date: r.date});
+      if (!r2.ok) { d.querySelector('.say').textContent = (await r2.json()).detail; }
+      jobsPoll();
+    };
+    d.appendChild(b);
+    // The blocking copy is the fix instruction — show it in full, never truncated.
+    const say = document.createElement('span');
+    say.className = 'say bad'; say.textContent = st.blocked;
+    d.appendChild(say);
+    box.appendChild(d);
+  }
+}
+
+function jobCard(j) {
+  const p = j.progress || {}, r = j.result || {};
+  const dot = {QUEUED: 's-idle', RUNNING: 's-warn', DONE: 's-ok',
+               FAILED: 's-bad', CANCELLED: 's-idle'}[j.state];
+  const d = document.createElement('div');
+  d.className = 'panel';
+  let body = '';
+  if (j.state === 'RUNNING') {
+    body = `<div class="bar"><div style="width:${p.pct || 0}%"></div></div>`
+      + `<div class="res mono">segment ${p.i || 0}/${p.n || '?'} · ${p.cam || '—'}`
+      + ` · ${p.pct || 0}% · events ${p.events || 0}</div>`;
+  } else if (j.state === 'DONE') {
+    body = `<div class="res good">${r.events || 0} events · ${r.crops || 0} crops`
+      + `${r.dropped ? ' · ' + r.dropped + ' dropped' : ''}</div>`
+      + `<a class="btn" href="#/counts" style="margin-top:8px">Review counts →</a>`;
+  } else if (j.state === 'FAILED') {
+    body = `<div class="res bad">${(j.log || []).slice(-5).join('\n')}</div>`
+      + `<div class="res">attempt ${j.attempts}</div>`;
+  }
+  d.innerHTML = `<div class="row"><span class="state ${dot}">${j.state}`
+    + `${j.state === 'QUEUED' ? ' #' + j.queuePos : ''}</span>`
+    + `<span class="grow mono">${j.site} · ${j.date}</span></div>${body}`
+    + `<details><summary>log</summary><div class="well">`
+    + `${(j.log || []).join('\n') || 'nothing logged yet'}</div></details>`;
+  const acts = document.createElement('div');
+  acts.className = 'row'; acts.style.marginTop = '8px';
+  if (j.state === 'RUNNING' || j.state === 'QUEUED') {
+    const c = document.createElement('button');
+    c.className = 'btn halt'; c.textContent = 'Cancel';
+    c.onclick = () => post('/api/analyze/cancel', {job_id: j.id}).then(jobsPoll);
+    acts.appendChild(c);
+  }
+  if (j.state === 'FAILED' || j.state === 'CANCELLED') {
+    const c = document.createElement('button');
+    c.className = 'btn'; c.textContent = 'Retry';
+    c.onclick = () => post('/api/analyze/retry', {job_id: j.id}).then(jobsPoll);
+    acts.appendChild(c);
+  }
+  if (acts.children.length) d.appendChild(acts);
+  return d;
+}
+
+function renderJobs(list) {
+  const box = $('joblist');
+  if (!list.length) {
+    box.innerHTML = '<p class="empty">no jobs yet · queue a verified site-day above</p>';
+    return;
+  }
+  let waiting = 0;
+  list.forEach(j => { if (j.state === 'QUEUED') j.queuePos = ++waiting; });
+  box.innerHTML = '';
+  list.forEach(j => box.appendChild(jobCard(j)));   // newest at the bottom
+}
+
+// Only when SSE is down: a poll issued alongside a live stream can land after a newer
+// push and redraw the queue with staler state.
+async function jobsPoll() {
+  if (es) return;
+  renderJobs(await (await fetch('/api/analyze/jobs')).json());
+}
+
+// SSE carries job state; the poll is the fallback for a dropped field network, and
+// the job itself is unaffected either way.
+let es = null;
+function jobsStream() {
+  if (es) return;
+  es = new EventSource('/api/analyze/stream');
+  es.onmessage = e => renderJobs(JSON.parse(e.data));
+  es.onerror = () => { es.close(); es = null; setTimeout(jobsStream, 5000); };
+}
+
+addEventListener('hashchange', () => { if (location.hash.slice(2) === 'analyze') days(); });
+if (location.hash.slice(2) === 'analyze') days();
+jobsPoll(); jobsStream();
+setInterval(() => { if (!es && location.hash.slice(2) === 'analyze') jobsPoll(); }, 5000);
+
+// ---------------- Counts tab: QA first, then the numbers ----------------
+const CNT = {site: '', date: '', data: null, cls: '', pcu: false, period: 'day', flags: []};
+// Per-approach accents live only in charts and table headers — never on chrome.
+const ACCENT = ['#86a8cf', '#cfa886', '#9ac2a8', '#c791b5'];
+const accent = i => ACCENT[i % ACCENT.length];
+const esc = s => String(s).replace(/</g, '&lt;');
+
+// One place decides what a cell is worth: the class filter and the PCU toggle.
+function val(classes) {
+  const f = (CNT.data && CNT.data.pcu_factors) || {};
+  let n = 0;
+  for (const c in classes) {
+    if (CNT.cls && c !== CNT.cls) continue;
+    n += CNT.pcu ? classes[c] * (+f[c] || 1) : classes[c];
+  }
+  return CNT.pcu ? Math.round(n * 10) / 10 : n;
+}
+
+async function countsInit() {
+  // The corridor glance is licensed and optional: with no key configured the button
+  // never appears, per "with none configured, no probe UI appears anywhere".
+  fetch('/api/corridor').then(r => r.json())
+    .then(d => { $('c-corridor').hidden = !d.configured; }).catch(() => {});
+  const rows = await (await fetch('/api/ingest')).json();
+  const opts = [];
+  for (const r of rows) {
+    const st = await (await fetch(`/api/analyze/status/${r.site}/${r.date}`)).json();
+    if (st.events) opts.push(`<option value="${r.site}|${r.date}">${r.date} · ${r.site}`
+                             + ` · ${st.events} events</option>`);
+  }
+  $('c-day').innerHTML = opts.join('')
+    || '<option value="">no analyzed site-days yet — run a job in Analyze</option>';
+  if (opts.length) { $('c-day').selectedIndex = 0; await loadCounts(); }
+  else $('qa').innerHTML = '<p class="empty">no analyzed site-days yet · run a job in Analyze first</p>';
+}
+
+async function loadCounts() {
+  const [site, date] = ($('c-day').value || '|').split('|');
+  if (!site) return;
+  CNT.site = site; CNT.date = date;
+  CNT.data = await (await fetch(`/api/counts/${site}/${date}`)).json();
+  CNT.flags = (await (await fetch(`/api/flags/${site}/${date}`)).json()).rows;
+  const sel = $('c-class'), keep = CNT.cls;
+  sel.innerHTML = '<option value="">all classes</option>'
+    + CNT.data.classes.map(c => `<option${c === keep ? ' selected' : ''}>${c}</option>`).join('');
+  CNT.cls = sel.value;
+  $('drawer').hidden = true;
+  renderAll();
+}
+
+function renderAll() { qaPanel(); binTable(); sparks(); odMatrix(); }
+
+function qaPanel() {
+  const d = CNT.data, p = d.qa.pairing, cov = d.qa.coverage;
+  const hot = p.inferred_share > 30;
+  const dot = {ok: 's-ok', warn: 's-warn', bad: 's-bad'}[p.state] || 's-idle';
+  let html = `<div>
+      <div class="eyebrow">pairing rate</div>
+      <div class="big">${p.rate}%</div>
+      <div class="sub"><span class="state ${dot}">${p.state}</span></div>
+      <div class="sub">${p.same}% same-camera · <span class="inf${hot ? ' hot' : ''}">`
+    + `${p.inferred}% inferred</span></div>`
+    + (hot ? '<div class="res warn">heavy cross-camera inference — check arm ownership'
+             + ' and offsets</div>' : '')
+    + `<div class="sub">${p.paired}/${p.entries} entries paired`
+    + `${p.flagged ? ' · ' + p.flagged + ' flagged' : ''}</div></div>`;
+
+  const win = cov.window, span = (win[1] - win[0]) || 1;
+  const cams = Object.entries(cov.per_cam);
+  const hours = cams.reduce((a, [, c]) => Math.max(a, c.hours), 0);
+  html += `<div><div class="eyebrow">coverage</div>`
+    + `<div class="big">${hours} h</div>`
+    + `<div class="sub">of ${cov.expected_hours} h surveyed</div>`;
+  for (const [cam, c] of cams) {
+    let strip = '', at = win[0];
+    for (const [s, e] of c.recorded) {
+      if (s > at) strip += `<i class="gap" style="width:${(s - at) / span * 100}%"></i>`;
+      strip += `<i class="rec" style="width:${(e - Math.max(s, at)) / span * 100}%"></i>`;
+      at = Math.max(at, e);
+    }
+    if (at < win[1]) strip += `<i class="gap" style="width:${(win[1] - at) / span * 100}%"></i>`;
+    html += `<div class="sub">${cam} · ${c.hours} h</div><div class="strip">${strip}</div>`;
+  }
+  html += '</div>';
+
+  html += `<div><div class="eyebrow">clock offsets</div><div id="offchips"></div>`
+    + `<div class="res" id="offres"></div></div>`;
+
+  const pr = d.qa.probe;
+  if (pr) {
+    const thin = pr.median_n < 10;
+    html += `<div class="probe"><div class="eyebrow">probe</div>`
+      + `<div class="big">n̄ ${pr.median_n}/bin</div>`
+      + `<div class="sub">${pr.bins_pct}% bins</div>`
+      + `<div class="res${thin ? ' warn' : ''}">${thin
+          ? 'thin probe sample — corroboration only, per research memo'
+          : 'corroboration only'}</div>`
+      + `<div class="attrib">© ${esc(pr.provider || 'provider')}</div></div>`;
+  }
+  const un = Object.entries(d.qa.unmapped);
+  if (un.length) html += `<div><div class="eyebrow">unmapped labels</div>`
+    + `<div class="sub">${un.map(([k, n]) => esc(k) + ' ×' + n).join('<br>')}</div>`
+    + `<div class="res warn">counted as "other" — add them to config classes</div></div>`;
+  $('qa').innerHTML = html;
+  offChips();
+}
+
+async function offChips() {
+  const offs = await (await fetch(`/api/offsets/${CNT.site}/${CNT.date}`)).json();
+  const box = $('offchips');
+  if (!box) return;
+  box.innerHTML = '';
+  for (const cam in offs) {
+    const v = offs[cam], unset = v === null || v === undefined;
+    const b = document.createElement('button');
+    b.className = 'chip' + (unset ? ' unset' : '');
+    b.innerHTML = unset ? `<span class="state s-bad">${cam} unset</span>`
+                        : `${cam} ${v >= 0 ? '+' : ''}${v} s`;
+    b.onclick = () => offEditor(cam, v);
+    box.appendChild(b);
+  }
+}
+
+function offEditor(cam, cur) {
+  const box = $('offres');
+  box.className = 'res';
+  box.innerHTML = `<div class="sub">seconds ADDED to file timestamps to get true`
+    + ` Africa/Lusaka time — a camera left on China time needs −21600.`
+    + ` Zero must be entered explicitly.</div>`;
+  const inp = document.createElement('input');
+  inp.type = 'number'; inp.step = 'any'; inp.value = cur === null ? '' : cur;
+  inp.style.cssText = 'margin:8px 8px 0 0;max-width:160px';
+  const save = document.createElement('button');
+  save.className = 'btn go'; save.textContent = `Save ${cam}`;
+  save.onclick = async () => {
+    const r = await post('/api/offsets', {site: CNT.site, date: CNT.date, cam,
+                                          offset_s: inp.value === '' ? null : +inp.value});
+    box.className = 'res ' + (r.ok ? 'warn' : 'bad');
+    box.textContent = r.ok
+      ? 'changed offsets take effect on the next Analyze run — re-run the site-day'
+      : (await r.json()).detail;
+    offChips();
+  };
+  box.appendChild(inp); box.appendChild(save);
+}
+
+$('c-day').onchange = loadCounts;
+$('c-class').onchange = () => { CNT.cls = $('c-class').value; renderAll(); };
+$('c-pcu').onclick = () => {
+  CNT.pcu = !CNT.pcu;
+  $('c-pcu').textContent = 'PCU ' + (CNT.pcu ? 'on' : 'off');
+  $('c-pcu').classList.toggle('go', CNT.pcu);
+  renderAll();
+};
+document.querySelectorAll('#c-period .btn').forEach(b => b.onclick = () => {
+  CNT.period = b.dataset.p;
+  document.querySelectorAll('#c-period .btn').forEach(x => x.classList.toggle('on', x === b));
+  odMatrix(); $('drawer').hidden = true;
+});
+function peakBins(p) {
+  if (!p) return [];
+  const i = CNT.data.bins.findIndex(b => b.start === p.start);
+  return i < 0 ? [] : CNT.data.bins.slice(i, i + 4).map(b => b.ts);
+}
+
+function phf(bins, arm) {
+  const v = bins.map(b => arm ? val(b.arms[arm].classes) : val(allClasses(b)));
+  const tot = v.reduce((a, n) => a + n, 0), busiest = Math.max(...v, 0);
+  return busiest ? (tot / (4 * busiest)).toFixed(2) : '—';
+}
+
+function allClasses(b) {
+  const out = {};
+  for (const a in b.arms) for (const c in b.arms[a].classes)
+    out[c] = (out[c] || 0) + b.arms[a].classes[c];
+  return out;
+}
+
+function binTable() {
+  const d = CNT.data, arms = d.arms, t = $('bintable');
+  if (!d.bins.length) { t.innerHTML = '<caption class="empty">no bins</caption>'; return; }
+  const am = peakBins(d.peaks.am), pm = peakBins(d.peaks.pm);
+  let head = '<thead><tr><th class="binc">bin</th>'
+    + arms.map((a, i) => `<th class="arm" style="color:${accent(i)}">${esc(a)}</th>`).join('')
+    + '<th>total</th></tr></thead><tbody>';
+  let body = '';
+  for (const b of d.bins) {
+    const peak = am.includes(b.ts) || pm.includes(b.ts);
+    body += `<tr class="${peak ? 'peak' : ''}"><td class="binc">${b.start.slice(11, 16)}</td>`;
+    let row = 0;
+    for (const a of arms) {
+      const cell = b.arms[a];
+      if (cell.gap) {
+        // A gap must never look like a zero — hatched, empty, and it says why.
+        body += '<td class="gap" title="no footage — missing, not zero"></td>';
+      } else {
+        const n = val(cell.classes);
+        row += n;
+        // A measured zero prints as 0. Blank means only one thing — the hatched gap —
+        // because at the spec's hatch contrast an empty cell would read as either.
+        body += `<td>${n}</td>`;
+      }
+    }
+    body += `<td>${row}</td></tr>`;
+  }
+  let foot = '<tfoot>';
+  for (const [label, bins] of [['AM peak', am], ['PM peak', pm]]) {
+    if (!bins.length) continue;
+    const rows = d.bins.filter(b => bins.includes(b.ts));
+    foot += `<tr><td class="binc">${label}</td>`
+      + arms.map(a => rows.reduce((s, b) => s + val(b.arms[a].classes), 0)).map(n => `<td>${n}</td>`).join('')
+      + `<td>${rows.reduce((s, b) => s + val(allClasses(b)), 0)}</td></tr>`
+      + `<tr><td class="binc">PHF</td>`
+      + arms.map(a => `<td>${phf(rows, a)}</td>`).join('')
+      + `<td>${phf(rows, null)}</td></tr>`;
+  }
+  foot += `<tr><td class="binc">day total</td>`
+    + arms.map(a => `<td>${d.bins.reduce((s, b) => s + val(b.arms[a].classes), 0)}</td>`).join('')
+    + `<td>${d.bins.reduce((s, b) => s + val(allClasses(b)), 0)}</td></tr></tfoot>`;
+  t.innerHTML = head + body + '</tbody>' + foot;
+}
+
+function sparks() {
+  const d = CNT.data, box = $('sparks');
+  if (!d.bins.length) { box.innerHTML = '<p class="empty">no bins</p>'; return; }
+  const W = 640, H = 54, n = d.bins.length;
+  const x = i => (n < 2 ? 0 : i / (n - 1) * (W - 4)) + 2;
+  const pr = d.qa.probe;
+  box.innerHTML = '';
+  d.arms.forEach((arm, ai) => {
+    const vals = d.bins.map(b => b.arms[arm].gap ? null : val(b.arms[arm].classes));
+    const top = Math.max(1, ...vals.filter(v => v !== null));
+    const y = v => H - 4 - v / top * (H - 10);
+    // Gaps break the line: interpolating across missing footage would invent traffic.
+    let segs = [], cur = [];
+    vals.forEach((v, i) => {
+      if (v === null) { if (cur.length) segs.push(cur); cur = []; }
+      else cur.push(`${x(i)},${y(v)}`);
+    });
+    if (cur.length) segs.push(cur);
+    let svg = segs.map(s => `<polyline fill="none" stroke="${accent(ai)}" stroke-width="2"`
+                          + ` points="${s.join(' ')}"/>`).join('');
+    vals.forEach((v, i) => { if (v === null) svg += `<rect x="${x(i) - 1}" y="${H - 8}"`
+      + ` width="2" height="4" fill="#8a939b"><title>gap — no footage</title></rect>`; });
+    if (pr && CNT.probeOn) {
+      const cells = {};
+      pr.cells.filter(c => c.arm === arm).forEach(c => { cells[c.bin] = c; });
+      const pmax = Math.max(1, ...Object.values(cells).map(c => c.delay_s));
+      let ps = [], pcur = [];
+      d.bins.forEach((b, i) => {
+        const c = cells[b.ts];
+        if (!c) { if (pcur.length) ps.push(pcur); pcur = []; }
+        else pcur.push(`${x(i)},${H - 4 - c.delay_s / pmax * (H - 10)}`);
+      });
+      if (pcur.length) ps.push(pcur);
+      svg += ps.map(s => `<polyline fill="none" stroke="#8a939b" stroke-width="1.5"`
+        + ` stroke-dasharray="4 4" points="${s.join(' ')}"/>`).join('');
+      d.bins.forEach((b, i) => { const c = cells[b.ts]; if (c)
+        svg += `<circle cx="${x(i)}" cy="${H - 4 - c.delay_s / pmax * (H - 10)}" r="4"`
+          + ` fill="transparent"><title>${c.delay_s}s delay · n=${c.sample_n}</title></circle>`; });
+    }
+    const div = document.createElement('div');
+    div.style.marginBottom = '10px';
+    div.innerHTML = `<div class="sub" style="color:${accent(ai)}">${esc(arm)}`
+      + ` <span style="color:var(--dim)">peak ${top}</span></div>`
+      + `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" role="img"`
+      + ` aria-label="${esc(arm)} profile">${svg}</svg>`;
+    box.appendChild(div);
+  });
+  if (pr) {
+    const t = document.createElement('button');
+    t.className = 'btn'; t.textContent = 'Probe ' + (CNT.probeOn ? 'on' : 'off');
+    t.onclick = () => { CNT.probeOn = !CNT.probeOn; sparks(); };
+    box.appendChild(t);
+    box.insertAdjacentHTML('beforeend', `<div class="attrib">© ${esc(pr.provider)}`
+      + ' · corroboration only, never a counted series</div>');
+  }
+}
+
+function periodBins() {
+  const d = CNT.data;
+  if (CNT.period === 'am') return peakBins(d.peaks.am);
+  if (CNT.period === 'pm') return peakBins(d.peaks.pm);
+  return d.bins.map(b => b.ts);
+}
+
+function odMatrix() {
+  const d = CNT.data, t = $('odtable'), keep = periodBins();
+  const cells = d.movements.od.filter(c => keep.includes(c.bin)
+                                      && (!CNT.cls || c.cls === CNT.cls));
+  const f = d.pcu_factors || {};
+  const grid = {};
+  for (const c of cells) {
+    const k = c.entry + '\u0000' + c.exit;
+    const w = CNT.pcu ? (+f[c.cls] || 1) : 1;
+    const g = grid[k] || (grid[k] = {n: 0, t2: 0});
+    g.n += c.count * w; g.t2 += c.tier2_count * w;
+  }
+  const entries = d.arms, exits = d.arms;
+  if (!entries.length) { t.innerHTML = '<caption class="empty">no movements</caption>'; return; }
+  let html = '<thead><tr><th>entry \\ exit</th>'
+    + exits.map((a, i) => `<th style="color:${accent(i)}">${esc(a)}</th>`).join('')
+    + '</tr></thead><tbody>';
+  for (const [i, en] of entries.entries()) {
+    html += `<tr><th style="color:${accent(i)};text-align:left">${esc(en)}</th>`;
+    for (const ex of exits) {
+      const g = grid[en + '\u0000' + ex];
+      const n = g ? (CNT.pcu ? Math.round(g.n * 10) / 10 : g.n) : 0;
+      const inf = g && g.t2 ? Math.round(g.t2 / g.n * 100) : 0;
+      // A client-facing number must never hide how confident it is.
+      html += `<td class="cell${en === ex ? ' diag' : ''}" data-e="${esc(en)}"`
+        + ` data-x="${esc(ex)}">${n || '·'}`
+        + `${inf ? `<span class="inf">·${inf}% inf</span>` : ''}</td>`;
+    }
+    html += '</tr>';
+  }
+  t.innerHTML = html + '</tbody>';
+  t.querySelectorAll('td.cell').forEach(td => td.onclick =
+    () => drawer(td.dataset.e, td.dataset.x));
+}
+
+async function drawer(entry, exit) {
+  const keep = periodBins();
+  const r = await (await fetch(`/api/movements/${CNT.site}/${CNT.date}`
+    + `?entry=${encodeURIComponent(entry)}&exit=${encodeURIComponent(exit)}&limit=200`)).json();
+  const rows = r.movements.filter(m => keep.includes(m.bin)
+                                  && (!CNT.cls || m.cls === CNT.cls)).slice(0, 30);
+  const period = {am: 'AM peak', pm: 'PM peak', day: 'full day'}[CNT.period];
+  $('dr-title').textContent = `${entry} → ${exit} · ${period}`
+    + ` · showing ${rows.length} of ${r.total}`;
+  const box = $('dr-rows');
+  box.innerHTML = rows.length ? '' : '<p class="empty">no movements in this cell</p>';
+  for (const m of rows) {
+    const div = document.createElement('div');
+    div.className = 'mv';
+    // Fetched rather than set as src: only the response tells us whether the bytes
+    // came off this disk or were redirected to the CDN copy, and provenance is
+    // part of the evidence.
+    const shot = (key, cam, clock) => key
+      ? `<figure><img data-key="${key}" alt="" loading="lazy">`
+        + `<figcaption>${cam} · ${clock}<span class="prov"></span></figcaption></figure>`
+      : `<figure><div class="nocrop">no crop — analysis predates crops or the write`
+        + ` failed</div><figcaption>${cam} · ${clock}</figcaption></figure>`;
+    const flagged = CNT.flags.some(f => f.entry_ts === m.entry_ts);
+    div.innerHTML = shot(m.crops[0], m.entry_cam, m.entry_clock)
+      + shot(m.crops[1], m.exit_cam, m.exit_clock)
+      + `<span class="state ${m.tier === 2 ? 's-warn' : 's-ok'}">`
+      + `${m.tier === 2 ? 'inferred' : 'same camera'}</span>`
+      + `<span class="sub">${esc(m.cls)} · Δt ${m.dt}s · ${m.bin_start.slice(11, 16)}</span>`;
+    const b = document.createElement('button');
+    b.className = 'btn'; b.style.marginLeft = 'auto';
+    b.textContent = flagged ? 'Flagged' : 'Flag';
+    b.disabled = flagged;
+    b.onclick = async () => {
+      await post('/api/flag', {site: CNT.site, date: CNT.date, entry, exit,
+                               bin: m.bin, entry_ts: m.entry_ts});
+      CNT.flags.push({entry_ts: m.entry_ts});
+      b.textContent = 'Flagged'; b.disabled = true;
+      CNT.data = await (await fetch(`/api/counts/${CNT.site}/${CNT.date}`)).json();
+      qaPanel();                       // flags move QA copy, never a count
+    };
+    div.appendChild(b);
+    box.appendChild(div);
+    div.querySelectorAll('img[data-key]').forEach(loadCrop);
+  }
+  $('drawer').hidden = false;
+  $('drawer').scrollIntoView({block: 'nearest'});
+}
+
+// A crop offloaded to R2 comes back as a redirect to the CDN. Same picture, different
+// custody — label it, because a reviewer should know which copy they are looking at.
+async function loadCrop(img) {
+  try {
+    const r = await fetch('/api/crop/' + img.dataset.key);
+    if (!r.ok) throw new Error(r.status);
+    img.src = URL.createObjectURL(await r.blob());
+    if (r.redirected) img.parentNode.querySelector('.prov').textContent = ' · from CDN';
+  } catch (e) {
+    img.replaceWith(nocrop());
+  }
+}
+
+// A crop that 404s becomes a labelled box, never a broken-image icon.
+function nocrop() {
+  const d = document.createElement('div');
+  d.className = 'nocrop';
+  d.textContent = 'no crop — analysis predates crops or the write failed';
+  return d;
+}
+
+$('dr-close').onclick = () => { $('drawer').hidden = true; };
+addEventListener('hashchange', () => { if (location.hash.slice(2) === 'counts') countsInit(); });
+if (location.hash.slice(2) === 'counts') countsInit();
+
+// ---------------- Report tab: the client deliverable ----------------
+async function reportInit() {
+  const rows = await (await fetch('/api/ingest')).json();
+  const opts = [];
+  for (const r of rows) {
+    const st = await (await fetch(`/api/analyze/status/${r.site}/${r.date}`)).json();
+    opts.push(`<option value="${r.site}|${r.date}" data-ev="${st.events}">`
+      + `${r.date} · ${r.site}${st.events ? '' : ' · not analyzed'}</option>`);
+  }
+  $('r-day').innerHTML = opts.join('')
+    || '<option value="">nothing in the ingest tree yet</option>';
+  if (opts.length) reportCard();
+}
+
+async function reportCard() {
+  const [site, date] = ($('r-day').value || '|').split('|');
+  const box = $('rcard');
+  $('r-files').innerHTML = ''; $('r-res').textContent = '';
+  if (!site) { box.innerHTML = '<p class="empty">nothing to export</p>'; return; }
+  const events = +$('r-day').selectedOptions[0].dataset.ev;
+  if (!events) {
+    // Not exportable: say why, and link to the tab that fixes it.
+    $('r-go').disabled = true;
+    box.innerHTML = `<div class="eyebrow">not exportable</div>`
+      + `<div class="res bad">${date} · ${site} has not been analyzed —`
+      + ` <a href="#/analyze" style="color:inherit">queue it in Analyze</a></div>`;
+    return;
+  }
+  $('r-go').disabled = false;
+  const [c, st] = await Promise.all([
+    (await fetch(`/api/counts/${site}/${date}`)).json(),
+    (await fetch(`/api/report/${site}/${date}`)).json()]);
+  const p = c.qa.pairing, dot = {ok: 's-ok', warn: 's-warn', bad: 's-bad'}[p.state];
+  const unset = Object.entries(c.qa.offsets).filter(([, v]) => v === null).map(([k]) => k);
+  box.innerHTML = `<div class="row"><span class="grow mono" style="font-size:16px">`
+    + `${esc(site)} · ${date}</span><span class="state ${dot}">${p.state}</span></div>`
+    + `<div class="sub">${p.rate}% paired · ${p.same}% same-camera · ${p.inferred}% inferred`
+    + `${p.flagged ? ' · ' + p.flagged + ' flagged' : ''}</div>`
+    + `<div class="sub">coverage ${c.qa.coverage.expected_hours} h · cameras `
+    + `${Object.keys(c.qa.coverage.per_cam).join(' ')} · offsets `
+    + `${unset.length ? unset.join(', ') + ' UNSET' : 'all set ✓'}</div>`
+    + (c.qa.probe ? `<div class="sub">probe configured — a corroboration page is`
+        + ` included (© ${esc(c.qa.probe.provider)}, corroboration only)</div>` : '');
+  $('r-go').onclick = () => runExport(site, date);
+  if (st.exists) showFiles(site, date, st);
+}
+
+function showFiles(site, date, st) {
+  const files = Object.entries(st.files).filter(([n]) => n !== 'manifest.json');
+  $('r-files').innerHTML = files.map(([n]) =>
+    `<a class="btn" href="/api/report/file/${site}/${date}/${n}" download>`
+    + `${n.endsWith('.pdf') ? 'PDF' : 'Excel'}</a>`).join('');
+  // Custody discipline made visible, the same as the ingest footage.
+  // A fresh export answers with the absolute dir; the status route only has the manifest.
+  $('r-res').innerHTML = `<div class="mono" style="font-size:12px">`
+    + `${esc(st.dir || `data/reports/${site}/${date}`)}/</div>`
+    + `<div class="state s-ok" style="margin-top:6px">SHA256 MANIFEST</div>`
+    + files.map(([n, f]) => `<div class="mono" style="font-size:11px;color:var(--dim)">`
+        + `${n} · ${f.sha256.slice(0, 16)}… · ${(f.bytes / 1024).toFixed(0)} kB</div>`).join('')
+    + `<div class="sub">generated ${st.generated_iso || ''}</div>`;
+}
+
+async function runExport(site, date) {
+  const btn = $('r-go');
+  btn.disabled = true; btn.textContent = 'Exporting…';
+  const r = await post(`/api/report/${site}/${date}`, {});
+  btn.disabled = false; btn.textContent = 'Re-export';
+  if (!r.ok) {
+    $('r-res').className = 'res bad';
+    $('r-res').textContent = (await r.json()).detail;
+    return;
+  }
+  $('r-res').className = 'res';
+  showFiles(site, date, await r.json());
+}
+
+$('r-day').onchange = reportCard;
+addEventListener('hashchange', () => { if (location.hash.slice(2) === 'report') reportInit(); });
+if (location.hash.slice(2) === 'report') reportInit();
+</script>
+</body>
+</html>

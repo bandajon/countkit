@@ -1,0 +1,90 @@
+# CountKit configuration. Copied to config.yaml on first boot; edit that copy
+# (in the UI or by hand) — this file stays as the reference.
+
+# Verified footage from FieldKit's nvr_pull: <ingest_root>/<date>/<site>/<cam>/*.mkv
+# On the Jetson this is /data/ingest.
+ingest_root: ./ingest
+
+# CountKit's own state: SQLite event DBs, calibrations, evidence crops, reports.
+data_root: ./data
+
+# UTC+2, no DST. All bins are clock quarters in this zone.
+site_tz: Africa/Lusaka
+
+# Model label -> report class. The detector's taxonomy changes (TrafficCamNet now,
+# a fine-tuned model later); this table absorbs that without a code change.
+classes:
+  - {model: car, report: car}
+  - {model: minibus, report: minibus}
+  - {model: bus, report: bus}
+  - {model: truck, report: light_truck}
+  - {model: heavy_truck, report: heavy_truck}
+  - {model: motorcycle, report: motorcycle}
+  - {model: bicycle, report: bicycle}
+
+# Passenger-car-unit factors per report class, applied only when the PCU toggle is on.
+pcu:
+  car: 1.0
+  minibus: 1.5
+  bus: 2.5
+  light_truck: 1.5
+  heavy_truck: 2.5
+  motorcycle: 0.5
+  bicycle: 0.5
+
+# DeepStream nvinfer config file. The model is configuration, not code — the same
+# CountKit runs on the RTX rig by pointing this elsewhere. Empty = mock detector.
+nvinfer_config: ""
+
+# Licensed floating-car dataset for corroboration only (never a second count).
+# provider e.g. tomtom; dataset is a path under data_root. Empty = no probe UI anywhere.
+# The CSV is what a TomTom Traffic Stats export / the Stage-0 poller produces:
+#   site,arm,bin_start_iso,delay_s,speed_kmh,sample_n
+#   gerlache,Great East Rd,2026-08-04T07:00:00+02:00,42.5,18.3,14
+# sample_n travels with every figure — a delay built on 3 vehicles must look that thin.
+probe:
+  provider: ""
+  dataset: ""
+
+# Cloudflare R2 offload for evidence crops. Credentials live here, never in the UI.
+# Local copies are deleted only after a verified upload and only under disk pressure.
+r2:
+  enabled: false
+  account_id: ""
+  access_key_id: ""
+  secret_access_key: ""
+  bucket: countkit-crops
+  # Disk floor in GB. Above it, verified crops are uploaded and the local copy is KEPT
+  # (the UI reads it instantly). Only below it does a verified upload also delete
+  # locally, oldest first, and only until the drive is back above the floor.
+  min_free_gb: 20
+  # Public CDN base for offloaded crops, e.g. https://crops.example.com. When a crop
+  # is gone locally, /api/crop redirects here and the UI labels it "from CDN".
+  cdn_base: ""
+
+# Live, attributed, unstored sanity glance only — Google data is never stored.
+google_routes:
+  api_key: ""
+
+# Corridor congestion map at /corridor. Needs google_routes.api_key AND enabled: true;
+# without both, the page says "not configured" and no Google request is ever made.
+# road: the corridor centreline, in order — one map segment per adjacent pair.
+# junctions: i indexes into road; set site to link a surveyed junction to its counts.
+corridor:
+  enabled: false
+  road:
+    - [-15.3906, 28.3228]      # Great East Rd at Manda Hill
+    - [-15.3939, 28.3300]      # Arcades
+    - [-15.3960, 28.3390]      # Crossroads
+    - [-15.3990, 28.3500]      # Kalingalinga
+  cross:
+    - {name: Church Rd, pts: [[-15.3925, 28.3270], [-15.3955, 28.3245]]}
+    - {name: Addis Ababa Dr, pts: [[-15.3945, 28.3345], [-15.3975, 28.3320]]}
+  junctions:
+    - {i: 1, name: Arcades, site: gerlache}
+    - {i: 2, name: Crossroads, site: ""}
+
+# Stamped on Excel/PDF deliverables. logo_path is relative to data_root.
+branding:
+  company_name: Dexterity
+  logo_path: ""
