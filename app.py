@@ -115,22 +115,27 @@ def detector():
     key absent an nvinfer config selects the real pipeline and its absence replays
     fixtures. Same engine either way — and never a quiet swap: a backend that was asked
     for and cannot be had is an error, not a fallback to a different set of numbers."""
-    raw = CONFIG.get("detector") or ""
-    want = raw.strip().lower()
+    raw = CONFIG.get("detector")
+    # YAML reads `detector: off` as False and `yes` as True — neither may reach the
+    # legacy branch, where an unrelated nvinfer_config would quietly pick DeepStream.
+    want = raw.strip().lower() if isinstance(raw, str) else raw
+    if want not in (None, "", "mock", "yolo", "deepstream"):
+        raise ValueError(f"detector: {raw!r} is not a detector — set it to mock, yolo "
+                         "or deepstream")
     cfg = CONFIG.get("nvinfer_config") or ""
     if want == "mock" or (not want and not cfg):
         return engine.mock_factory(ROOT / "fixtures")
     if want == "yolo":
         import yolo_runner
-        return yolo_runner.factory(ingest_root(), CONFIG.get("yolo") or {})
-    if want in ("", "deepstream"):
-        if not cfg:
-            raise ValueError("detector: deepstream needs nvinfer_config set — point it "
-                             "at your model's nvinfer config file")
-        import deepstream_runner
-        return deepstream_runner.factory(ingest_root(), cfg)
-    raise ValueError(f"detector: {raw!r} is not a detector — set it to mock, yolo or "
-                     "deepstream")
+        # Weights live under data/, not the container: a bare model name must resolve to
+        # the same file after the image is rebuilt.
+        return yolo_runner.factory(ingest_root(), {**(CONFIG.get("yolo") or {}),
+                                                   "weights_dir": str(data_root() / "models")})
+    if not cfg:
+        raise ValueError("detector: deepstream needs nvinfer_config set — point it "
+                         "at your model's nvinfer config file")
+    import deepstream_runner
+    return deepstream_runner.factory(ingest_root(), cfg)
 
 
 def run_job(site, date, say, cancelled):

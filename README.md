@@ -36,10 +36,14 @@ stack is in the image.
 | `ds-jetson` | Orin Nano via DeepStream 7.1 (the JetPack 6 pairing) |
 
 ```
-cp config.example.yaml config.yaml && mkdir -p ingest data
-docker compose --profile yolo up -d          # http://<host>:8090
-docker/smoke.sh yolo                         # build, run the suite in-image, boot, poll /api/status
+docker/smoke.sh yolo                 # build, suite in-image, boot, poll /api/status, down again
+docker compose --profile yolo up -d  # http://<host>:8090
 ```
+
+Smoke first, then up — smoke tears down the stack it starts. It also creates
+`config.yaml` (from the example) plus `ingest/` and `data/` if they're missing;
+going straight to `up` instead, create them yourself first, or Docker
+materialises those bind mounts as root-owned directories.
 
 Set `detector: yolo` in `config.yaml` for the yolo profiles. The `ds-*` profiles
 set up TrafficCamNet on boot and print the `nvinfer_config:` line to paste into

@@ -53,6 +53,8 @@ yolo:
   # Ultralytics weights: a bundled name auto-downloads on first run, or a path to
   # your own fine-tune. COCO labels (car, bus, truck, motorcycle, bicycle) reach the
   # report through the classes table above.
+  # A bare name downloads once into <data_root>/models/, so it survives a container
+  # recreate; a path (./ or /) is used as given and downloads nothing.
   model: yolo11s.pt
   # Infer on every Nth decoded frame. 3 is ~10fps of a 30fps camera — enough for a
   # crossing, a third of the GPU. Raise it if the box falls behind real time.

@@ -16,9 +16,6 @@ x-countkit: &countkit
     - ./config.yaml:/countkit/config.yaml
     - ./ingest:/countkit/ingest
     - ./data:/countkit/data
-    # Ultralytics weight cache — a no-op in the DeepStream images, but a merge key
-    # replaces a list rather than extending it, so it lives here for all four.
-    - ultralytics-cache:/root/.config/Ultralytics
   restart: unless-stopped
 
 services:
@@ -61,6 +58,3 @@ services:
       args:
         BASE: nvcr.io/nvidia/deepstream:7.1-triton-multiarch
     runtime: nvidia
-
-volumes:
-  ultralytics-cache:

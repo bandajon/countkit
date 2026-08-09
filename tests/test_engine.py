@@ -293,6 +293,57 @@ def a_failing_crop_does_not_stop_analysis():
     assert crop_bytes() == [engine.PLACEHOLDER_JPEG] * 3, "placeholder not written"
 
 
+def a_failed_detector_keeps_the_last_run():
+    build()
+    run_with(engine.MockDetector)
+    before, before_crops = rows(), crop_bytes()
+
+    def wont_start(site, date, cam):
+        raise RuntimeError("no CUDA device")
+
+    try:
+        engine.analyze(SITE, DATE, TMP / "ingest", app.data_root(), wont_start)
+        raise AssertionError("a detector that cannot start was accepted")
+    except RuntimeError:
+        pass
+    assert rows() == before, "a run that never started wiped the previous events"
+    assert crop_bytes() == before_crops, "it wiped the previous crops too"
+
+
+# ---- a footage gap is not a road: nothing may be paired across one ----
+
+GAP_SITE = "kalulushi"
+
+
+def build_gap(gap_s):
+    """One camera, two 600 s segments `gap_s` apart. Obj 4 sits below the gate in the
+    last frame before the break and above it in the first frame after — a crossing only
+    if the two positions are allowed to pair."""
+    day = TMP / "ingest" / DATE / GAP_SITE
+    (day / "cam1").mkdir(parents=True, exist_ok=True)
+    (day / ".verified").touch()
+    (day / "manifest.json").write_text(json.dumps({"time_offset_s": {"cam1": 0.0}}))
+    seg2 = time.strftime("%Y%m%d-%H%M%S.mkv",
+                         time.localtime(engine.segment_epoch(SEG) + 600 + gap_s))
+    fd = FIX / GAP_SITE / DATE
+    fd.mkdir(parents=True, exist_ok=True)
+    (fd / "segments.json").write_text(json.dumps({"cam1": [
+        {"file": SEG, "duration": 600}, {"file": seg2, "duration": 600}]}))
+    (fd / "cam1.jsonl").write_text("\n".join(json.dumps(f) for f in [
+        {"t": 0.0, "objects": [obj(4, 400)], "seg": SEG},
+        {"t": 599.0, "objects": [obj(4, 400)], "seg": SEG},
+        {"t": 0.0, "objects": [obj(4, 200)], "seg": seg2}]))
+    calib.save_calibration(GAP_SITE, "cam1", {"image_size": [1000, 600],
+                                              "lines": [gate("entry", "Gap Rd")]})
+    return engine.analyze(GAP_SITE, DATE, TMP / "ingest", app.data_root(),
+                          engine.mock_factory(FIX))["events"]
+
+
+def a_gap_resets_the_tracker():
+    assert build_gap(0.0) == 1, "contiguous segments lost a real crossing"
+    assert build_gap(60.0) == 0, "a crossing was invented inside a footage gap"
+
+
 def unknown_detector_fails_loudly():
     app.CONFIG["detector"] = "nosuch"
     try:
@@ -302,6 +353,13 @@ def unknown_detector_fails_loudly():
         assert "nosuch" in str(e), e
     app.CONFIG["detector"] = "mock"
     assert isinstance(app.detector()(SITE, DATE, "cam1"), engine.MockDetector)
+    for bad in (False, True):                         # YAML reads `off`/`yes` as bools
+        app.CONFIG["detector"] = bad
+        try:
+            app.detector()
+            raise AssertionError(f"detector: {bad!r} was silently accepted")
+        except ValueError as e:
+            assert repr(bad) in str(e), e
     del app.CONFIG["detector"]                        # absent = today's behaviour
     assert isinstance(app.detector()(SITE, DATE, "cam1"), engine.MockDetector)
 
@@ -321,6 +379,8 @@ check("status route reports blocked and event counts", api_reports_state)
 check("a detector's own crop bytes reach disk", detector_crops_are_used)
 check("a detector without crop_for gets the placeholder", no_crop_for_falls_back)
 check("a raising crop_for degrades to the placeholder", a_failing_crop_does_not_stop_analysis)
+check("a detector that cannot start leaves the last run intact", a_failed_detector_keeps_the_last_run)
+check("a footage gap resets the tracker", a_gap_resets_the_tracker)
 check("an unknown detector: value fails loudly", unknown_detector_fails_loudly)
 
 print(f"\n{'FAILED: ' + ', '.join(FAILS) if FAILS else 'all passed'}")

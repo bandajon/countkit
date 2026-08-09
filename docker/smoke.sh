@@ -9,6 +9,11 @@ P="${1:?usage: smoke.sh <yolo|yolo-jetson|ds-x86|ds-jetson>}"
 SVC="countkit-$P"
 cd "$(dirname "$0")/.."
 
+# Compose materializes a missing bind source as a root-owned directory, and the app
+# treats a config.yaml directory as an existing config and crash-loops on it.
+[ -f config.yaml ] || cp config.example.yaml config.yaml
+mkdir -p ingest data
+
 echo "== build $SVC"
 docker compose --profile "$P" build
 
@@ -17,8 +22,15 @@ docker compose --profile "$P" run --rm --entrypoint bash "$SVC" \
     -c 'for t in tests/test_*.py; do echo "-- $t"; python3 "$t" || exit 1; done'
 
 echo "== boot"
+# Only tear down a stack this script started: `down` on the operator's own running
+# service kills a live analysis, and restart:unless-stopped won't bring it back.
+WAS_UP=$(docker compose --profile "$P" ps -q "$SVC")
 docker compose --profile "$P" up -d
-trap 'docker compose --profile "$P" down' EXIT
+if [ -z "$WAS_UP" ]; then
+    trap 'docker compose --profile "$P" down' EXIT
+else
+    echo "== stack was already up — leaving it running"
+fi
 
 for i in $(seq 60); do
     if curl -fsS http://localhost:8090/api/status > /tmp/countkit-status.json 2>/dev/null; then
