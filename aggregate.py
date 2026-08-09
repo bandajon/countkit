@@ -152,11 +152,15 @@ def coverage(ingest_root, date, site):
     """Recorded stretches per camera from the segment filenames, and the gaps between
     them. A gap must never render as a zero — that is the difference between 'no
     traffic' and 'no footage'."""
+    # Segment filenames carry each camera's OWN clock; a China-time camera would
+    # otherwise stretch the survey window six hours sideways and poison every gap.
+    # Unset offsets fall back to 0 here — display-only; analysis is blocked anyway.
+    offs = engine.offsets(ingest_root, date, site)
     per_cam = {}
     for cam in engine.site_day_cams(ingest_root, date, site):
         d = Path(ingest_root) / date / site / cam
-        starts = sorted(engine.segment_epoch(p.name) for p in d.glob("*.mkv")
-                        if engine.SEG_NAME.match(p.name))
+        starts = sorted(engine.segment_epoch(p.name) + float(offs.get(cam, 0.0))
+                        for p in d.glob("*.mkv") if engine.SEG_NAME.match(p.name))
         per_cam[cam] = {"recorded": _merge([[s, s + SEG_S] for s in starts])}
     spans = [r for c in per_cam.values() for r in c["recorded"]]
     window = [min(s for s, _ in spans), max(e for _, e in spans)] if spans else [0, 0]

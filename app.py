@@ -7,18 +7,21 @@ import queue
 import re
 import shutil
 import socket
+import time
 from datetime import datetime
 from pathlib import Path
 
 import uvicorn
 import yaml
 from fastapi import Body, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import (FileResponse, RedirectResponse, Response,
+                               StreamingResponse)
 from fastapi.staticfiles import StaticFiles
 
 import aggregate
 import calib
 import engine
+import offload
 import report
 
 PKG = Path(__file__).resolve().parent
@@ -134,6 +137,9 @@ def jobs_changed():
 
 
 JOBS = engine.Jobs(data_root(), run_job, jobs_changed)
+# Constructed always so /api/status can report it; the sweep thread starts only under
+# __main__, so importing app.py (tests, tooling) never touches anyone's crops.
+OFFLOAD = offload.Offload(CONFIG, data_root())
 
 app = FastAPI(title="CountKit")
 app.mount("/static", StaticFiles(directory=PKG / "static"), name="static")
@@ -153,6 +159,7 @@ def status():
         "gpu": {"temp_c": gpu_temp_c()},
         "active_job": next((f"{j['site']} {j['date']}" for j in JOBS.list()
                             if j["state"] == "RUNNING"), None),
+        "offload": OFFLOAD.info(),
         "time": datetime.now().isoformat(timespec="seconds"),
     }
 
@@ -195,7 +202,7 @@ def config_post(body: dict = Body(default={})):
         raise HTTPException(400, "config must be a mapping of keys")
     if cfg.get("classes") is not None and not isinstance(cfg["classes"], list):
         raise HTTPException(400, "'classes' must be a list if present")
-    for k in ("pcu", "probe", "r2", "google_routes", "branding"):
+    for k in ("pcu", "probe", "r2", "google_routes", "branding", "corridor"):
         if cfg.get(k) is not None and not isinstance(cfg[k], dict):
             raise HTTPException(400, f"'{k}' must be a mapping if present")
     # Write the operator's text verbatim: a safe_dump round-trip would strip every comment.
@@ -355,9 +362,73 @@ def crop_get(key: str):
     if ".." in key or key.startswith("/"):
         raise HTTPException(400, "bad crop key")
     p = data_root() / "crops" / key
-    if not p.is_file():
-        raise HTTPException(404, "no crop")
-    return FileResponse(p, media_type="image/jpeg")
+    if p.is_file():
+        return FileResponse(p, media_type="image/jpeg")
+    # Offloaded under disk pressure: the bytes live in R2 now, served through the CDN.
+    # The redirect is the provenance signal the drawer reads (response.redirected).
+    cdn = (CONFIG.get("r2") or {}).get("cdn_base") or ""
+    if cdn:
+        return RedirectResponse(cdn.rstrip("/") + "/" + key, status_code=302)
+    raise HTTPException(404, "no crop")
+
+
+CORRIDOR_TTL = 60
+_corridor_cache = {"at": 0.0, "payload": None}     # in memory only — see corridor_get()
+SPEEDS = {"NORMAL": 0, "SLOW": 1, "TRAFFIC_JAM": 2}
+
+
+def corridor_live(key, road):
+    """Google Routes congestion for each adjacent pair of corridor points.
+
+    LIVE ONLY. Google's terms bar storing or caching this series, so it is held for
+    CORRIDOR_TTL seconds in memory and never written to disk, never joined to counts,
+    never exported. The storable correlation work runs on the licensed TomTom dataset.
+    """
+    import requests
+    out = []
+    for i, (a, b) in enumerate(zip(road, road[1:])):
+        body = {"origin": {"location": {"latLng": {"latitude": a[0], "longitude": a[1]}}},
+                "destination": {"location": {"latLng": {"latitude": b[0], "longitude": b[1]}}},
+                "travelMode": "DRIVE", "routingPreference": "TRAFFIC_AWARE",
+                "extraComputations": ["TRAFFIC_ON_POLYLINE"]}
+        r = requests.post(
+            "https://routes.googleapis.com/directions/v2:computeRoutes", json=body,
+            headers={"X-Goog-Api-Key": key,
+                     "X-Goog-FieldMask": "routes.travelAdvisory.speedReadingIntervals"},
+            timeout=10)
+        r.raise_for_status()
+        routes = (r.json() or {}).get("routes") or [{}]
+        spans = (routes[0].get("travelAdvisory") or {}).get("speedReadingIntervals") or []
+        # Worst reading wins: a corridor glance should show the jam, not average it away.
+        level = max((SPEEDS.get(s.get("speed"), 0) for s in spans), default=0)
+        out.append({"i": i, "a": a, "b": b, "level": level})
+    return out
+
+
+@app.get("/api/corridor")
+def corridor_get():
+    cor = CONFIG.get("corridor") or {}
+    key = (CONFIG.get("google_routes") or {}).get("api_key") or ""
+    road = cor.get("road") or []
+    if not (cor.get("enabled") and key and len(road) > 1):
+        return {"configured": False}
+    base = {"configured": True, "road": road, "cross": cor.get("cross") or [],
+            "junctions": cor.get("junctions") or []}
+    now = time.time()
+    if _corridor_cache["payload"] and now - _corridor_cache["at"] < CORRIDOR_TTL:
+        return {**base, "segments": _corridor_cache["payload"]}
+    try:
+        segs = corridor_live(key, road)
+    except Exception as e:
+        # A dead key or no network is a missing glance, not a broken console.
+        return {**base, "segments": [], "error": f"{type(e).__name__}: {e}"}
+    _corridor_cache.update(at=now, payload=segs)
+    return {**base, "segments": segs}
+
+
+@app.get("/corridor")
+def corridor_page():
+    return FileResponse(PKG / "static" / "corridor-map.html")
 
 
 @app.get("/api/movements/{site}/{date}")
@@ -404,4 +475,5 @@ def offsets_post(body: dict = Body(default={})):
 
 
 if __name__ == "__main__":
+    OFFLOAD.start()
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8090)))
