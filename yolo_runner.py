@@ -89,30 +89,33 @@ class YoloDetector:
 
         for seg in self.segments:
             cap = cv2.VideoCapture(str(self.dir / seg["file"]))
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            if not fps or fps != fps or fps <= 0:      # 0, or NaN on a broken header
+            # finally, not a release at the end: a cancel raised through the yield or a
+            # model failure in _objects would otherwise leak the capture and its decoder.
+            try:
+                fps = cap.get(cv2.CAP_PROP_FPS)
+                if not fps or fps != fps or fps <= 0:      # 0, or NaN on a broken header
+                    raise ValueError(f'{seg["file"]}: unreadable fps — is this a FieldKit '
+                                     "segment?")
+                i = 0
+                # ponytail: decode every frame and infer on every stride-th. Seeking would
+                # skip the decode too, but frame-accurate seeking in mkv is its own bug
+                # farm; revisit if the Nano can't keep up.
+                while True:
+                    ok, frame = cap.read()
+                    if not ok:
+                        break
+                    # Real PTS of the frame just decoded. CAP_PROP_FPS on an NVR's matroska
+                    # is a header estimate, and a wrong one mis-bins every event and
+                    # stretches the re-cross debounce; index/fps is only the fallback for a
+                    # container that reports no position at all.
+                    msec = cap.get(cv2.CAP_PROP_POS_MSEC)
+                    if i % self.stride == 0:
+                        self.frame = frame
+                        t = msec / 1000.0 if msec > 0 or i == 0 else i / fps
+                        yield seg["file"], t, self._objects(frame)
+                    i += 1
+            finally:
                 cap.release()
-                raise ValueError(f'{seg["file"]}: unreadable fps — is this a FieldKit '
-                                 "segment?")
-            i = 0
-            # ponytail: decode every frame and infer on every stride-th. Seeking would
-            # skip the decode too, but frame-accurate seeking in mkv is its own bug
-            # farm; revisit if the Nano can't keep up.
-            while True:
-                ok, frame = cap.read()
-                if not ok:
-                    break
-                # Real PTS of the frame just decoded. CAP_PROP_FPS on an NVR's matroska
-                # is a header estimate, and a wrong one mis-bins every event and
-                # stretches the re-cross debounce; index/fps is only the fallback for a
-                # container that reports no position at all.
-                msec = cap.get(cv2.CAP_PROP_POS_MSEC)
-                if i % self.stride == 0:
-                    self.frame = frame
-                    t = msec / 1000.0 if msec > 0 or i == 0 else i / fps
-                    yield seg["file"], t, self._objects(frame)
-                i += 1
-            cap.release()
 
     def _objects(self, frame):
         r = self.model.track(frame, persist=True, verbose=False,

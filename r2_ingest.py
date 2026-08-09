@@ -28,6 +28,9 @@ import offload
 
 PREFIX = "ingest/"
 ROOT = Path(os.environ.get("COUNTKIT_ROOT") or Path(__file__).resolve().parent)
+# R2 caps a single PUT at 5 GiB; stop short of it with a readable error.
+# ponytail: multipart upload if a real segment ever reaches this size.
+MAX_PUT = int(4.5 * (1 << 30))
 
 
 def site_keys(client, bucket, date, site):
@@ -51,6 +54,17 @@ def _verified_last(names, is_verified):
     return sorted(names, key=lambda n: (is_verified(n), n))
 
 
+def _target(root, key):
+    """Where a bucket key lands locally. Keys are untrusted input — anyone with write
+    access to the bucket could park one containing .. and have the pull write outside
+    the ingest tree."""
+    root = Path(root).resolve()
+    p = root / key[len(PREFIX):]
+    if not p.resolve().is_relative_to(root):
+        sys.exit(f"{key}: this key escapes the ingest tree — refusing to write it")
+    return p
+
+
 def push(client, bucket, root, date, site):
     d = Path(root) / date / site
     files = [p for p in d.rglob("*") if p.is_file()]
@@ -60,9 +74,13 @@ def push(client, bucket, root, date, site):
     sent = skipped = 0
     for p in _verified_last(files, lambda p: p.name == ".verified"):
         key = PREFIX + p.relative_to(root).as_posix()
-        if have.get(key) == p.stat().st_size:
+        size = p.stat().st_size
+        if have.get(key) == size:
             skipped += 1
             continue
+        if size > MAX_PUT:
+            sys.exit(f"{p}: {size / (1 << 30):.1f} GiB is past the single-PUT ceiling — "
+                     "split that segment or move it across another way")
         # R2 recomputes the sha256 server-side and rejects a PUT that disagrees.
         with open(p, "rb") as body:
             client.put_object(Bucket=bucket, Key=key, Body=body,
@@ -77,10 +95,22 @@ def pull(client, bucket, root, date, site):
     if not have:
         sys.exit(f"nothing in the bucket for {site} {date} — push it from the "
                  "machine that has the footage")
+    plan = [(k, _target(root, k))
+            for k in _verified_last(have, lambda k: k.endswith("/.verified"))]
+
+    def landed(key, p):
+        return p.is_file() and p.stat().st_size == have[key]
+
+    # An incremental re-pull would otherwise keep the marker already on disk (it matches
+    # by size, so it is skipped) while fresh segments are still arriving, and
+    # engine.check_ready would call a half-arrived tree analyzable. Drop it first; the
+    # ordered loop below re-plants it last.
+    marker = Path(root) / date / site / ".verified"
+    if marker.is_file() and any(not landed(k, p) for k, p in plan if p.name != ".verified"):
+        marker.unlink()
     got = skipped = 0
-    for key in _verified_last(have, lambda k: k.endswith("/.verified")):
-        p = Path(root) / key[len(PREFIX):]
-        if p.is_file() and p.stat().st_size == have[key]:
+    for key, p in plan:
+        if landed(key, p):
             skipped += 1
             continue
         r = client.get_object(Bucket=bucket, Key=key, ChecksumMode="ENABLED")
@@ -94,7 +124,11 @@ def pull(client, bucket, root, date, site):
                 f.write(chunk)
                 h.update(chunk)
         want = r.get("ChecksumSHA256") or ""
-        if want and base64.b64encode(h.digest()).decode() != want:
+        if not want:
+            # Multipart, rclone and dashboard uploads carry no whole-object sha256, so
+            # the size match is all we have — say so rather than imply it was verified.
+            print(f"{key}: no checksum on object — accepted by size only")
+        elif base64.b64encode(h.digest()).decode() != want:
             tmp.unlink()
             sys.exit(f"{key}: sha256 mismatch on download — refusing to keep it "
                      "(re-run the pull)")

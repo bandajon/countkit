@@ -57,6 +57,9 @@ class Offload:
     def __init__(self, cfg, data_root):
         self.cfg = cfg              # the live CONFIG dict: config edits land without a reload
         self.crop_root = Path(data_root) / "crops"
+        # Nothing creates this until the first analysis, and free_gb() on a missing path
+        # would fail the sweep every 60s on a fresh install.
+        self.crop_root.mkdir(parents=True, exist_ok=True)
         self.client = None
         self.uploaded = 0
         self.deleted = 0
@@ -105,6 +108,16 @@ class Offload:
             return None
         return self.client
 
+    def _already_there(self, client, bucket, key, f):
+        """The done-set dies with the process, so every restart would re-PUT the whole
+        retained corpus over a field link. One HEAD is far cheaper. Any failure at all —
+        absent, network, permissions — falls through to uploading as before."""
+        try:
+            head = client.head_object(Bucket=bucket, Key=key)
+            return head["ContentLength"] == f.stat().st_size
+        except Exception:
+            return False
+
     def sweep(self):
         """Upload every closed crop oldest-first. Delete as we go only while the disk
         sits below the floor, and stop deleting the moment it is back above it."""
@@ -119,6 +132,8 @@ class Offload:
         pressure = self.free_gb() < floor
         for f in self.finished():
             key = "/".join(f.parts[-4:])          # <site>/<date>/<cam>/<crop>.jpg
+            if key not in self.done and self._already_there(client, bucket, key, f):
+                self.done.add(key)          # a previous process shipped it
             if key not in self.done:
                 try:
                     with open(f, "rb") as body:

@@ -213,6 +213,40 @@ def missing_ultralytics_fails_at_construction():
         yolo_runner.YoloDetector.load_model = lambda self: FakeModel()
 
 
+def the_capture_is_released_on_every_exit():
+    # A cancelled analysis closes the generator mid-segment and a model failure raises
+    # through it; either leaking the capture holds the decoder open for the whole run.
+    real, released = cv2.VideoCapture, []
+
+    class Watched:
+        def __init__(self, path):
+            self.cap = real(path)
+
+        def __getattr__(self, n):
+            return getattr(self.cap, n)
+
+        def release(self):
+            released.append(1)
+            self.cap.release()
+
+    cv2.VideoCapture = Watched
+    try:
+        it = iter(make(cfg={"stride": 5}))
+        next(it)
+        it.close()                                  # what a cancelled job does
+        assert released == [1], "closing the iterator mid-segment leaked the capture"
+
+        det = make(cfg={"stride": 5})
+        det.model.track = lambda *a, **kw: 1 / 0     # CUDA OOM, in effect
+        try:
+            list(det)
+        except ZeroDivisionError:
+            pass
+        assert len(released) == 2, "a model failure leaked the capture"
+    finally:
+        cv2.VideoCapture = real
+
+
 def factory_binds_root():
     det = yolo_runner.factory(TMP / "ingest", {})(SITE, DATE, CAM)
     assert [s["file"] for s in det.segments] == [SEG]
@@ -235,6 +269,8 @@ check("crop_for before any frame returns None", no_frame_is_none)
 check("an unreadable segment fails loudly, naming the file", unreadable_fps_names_the_file)
 check("missing ultralytics fails at construction", missing_ultralytics_fails_at_construction)
 check("factory binds ingest_root and config", factory_binds_root)
+check("the capture is released on cancel and on model failure",
+      the_capture_is_released_on_every_exit)
 
 shutil.rmtree(TMP, ignore_errors=True)
 print(f"\n{'FAILED: ' + ', '.join(FAILS) if FAILS else 'all passed'}")
