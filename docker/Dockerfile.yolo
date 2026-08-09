@@ -13,8 +13,8 @@ WORKDIR /app
 COPY requirements.txt ./
 # ponytail: retry with --break-system-packages rather than sniff the base image's
 # PEP-668 marker; drop the fallback once all bases ship a venv.
-RUN pip install --no-cache-dir -r requirements.txt \
- || pip install --no-cache-dir --break-system-packages -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt boto3 \
+ || pip install --no-cache-dir --break-system-packages -r requirements.txt boto3
 
 COPY *.py config.example.yaml ./
 COPY static/ ./static/

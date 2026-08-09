@@ -8,14 +8,20 @@
 #
 # Before the first `up`: `cp config.example.yaml config.yaml && mkdir -p ingest data`
 # — a bind mount of a missing host path becomes a directory, not a file.
+#
+# Footage on an external drive: point the mounts there instead of the checkout,
+# either inline (INGEST_DIR=/media/ssd/ingest docker compose ...) or once in a
+# .env file next to this one:
+#   INGEST_DIR=/media/ssd/ingest
+#   DATA_DIR=/media/ssd/countkit-data
 
 x-countkit: &countkit
   ports:
     - "8090:8090"
   volumes:
     - ./config.yaml:/countkit/config.yaml
-    - ./ingest:/countkit/ingest
-    - ./data:/countkit/data
+    - ${INGEST_DIR:-./ingest}:/countkit/ingest
+    - ${DATA_DIR:-./data}:/countkit/data
   restart: unless-stopped
 
 services:

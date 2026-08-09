@@ -49,6 +49,38 @@ Set `detector: yolo` in `config.yaml` for the yolo profiles. The `ds-*` profiles
 set up TrafficCamNet on boot and print the `nvinfer_config:` line to paste into
 `config.yaml`.
 
+### First boot on a Jetson
+
+JetPack 6 ships Docker with the NVIDIA runtime; what's usually missing is the
+compose plugin (`sudo apt install docker-compose-plugin`) and your user in the
+`docker` group (`sudo usermod -aG docker $USER`, then log out and in). Then:
+
+```
+git clone https://github.com/bandajon/countkit.git && cd countkit
+docker/smoke.sh yolo-jetson          # suite output, then the /api/status JSON = healthy
+```
+
+Set `detector: yolo` in `config.yaml` and `up -d`. The first analysis downloads
+the model weights (~20 MB, once, into `data/models/` — so a field box needs a
+connection that once, or copy the `.pt` file there yourself). When something is
+off, `docker compose --profile yolo-jetson logs` is where it says so.
+
+### Where the footage comes from
+
+`docker-compose.yaml` mounts `./ingest` and `./data` from the checkout. Footage
+on an external drive: put `INGEST_DIR=/media/<drive>/ingest` (and
+`DATA_DIR=/media/<drive>/countkit-data` — crops are the bulky part) in a `.env`
+file next to the compose file. Leave `ingest_root: ./ingest` in `config.yaml`
+alone; inside the container the path doesn't change.
+
+No drive at the box? The R2 bucket doubles as footage transport. On the machine
+that has the footage, `python3 r2_ingest.py push <date> <site>`; on the
+analyzing box, `pull` the same site-day (in Docker:
+`docker compose --profile yolo-jetson run --rm countkit-yolo-jetson python3
+r2_ingest.py pull <date> <site>`). Needs the `r2:` credentials in `config.yaml`;
+`list` shows what the bucket holds. The `.verified` marker travels last in both
+directions, so a half-arrived site-day never analyzes.
+
 ## The four tabs
 
 **Label** — draw ENTRY/EXIT gates over a camera's reference frame; the chevron

@@ -21,8 +21,8 @@ RUN chmod +x /usr/local/bin/install_pyds.sh /usr/local/bin/setup_model.sh \
 WORKDIR /app
 COPY requirements.txt ./
 # ponytail: see Dockerfile.yolo — same PEP-668 fallback.
-RUN pip3 install --no-cache-dir -r requirements.txt \
- || pip3 install --no-cache-dir --break-system-packages -r requirements.txt
+RUN pip3 install --no-cache-dir -r requirements.txt boto3 \
+ || pip3 install --no-cache-dir --break-system-packages -r requirements.txt boto3
 
 COPY *.py config.example.yaml ./
 COPY static/ ./static/
