@@ -7,6 +7,7 @@ remedy for bad data, because a hand-edited number destroys the warranty argument
 import csv
 import json
 import statistics
+import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -53,7 +54,9 @@ def load_events(data_root, site, date):
         "WHERE site=? AND date=? ORDER BY corrected_ts", (site, date)).fetchall()
     db.close()
     cols = ("cam", "obj_id", "cls", "line", "kind", "ts", "crop")
-    return [dict(zip(cols, r)) for r in rows]
+    # Stripped on load: arm_map strips calibration names but the events table stores them
+    # verbatim, so "North " and "North" would fork one arm into two columns.
+    return [dict(zip(cols, r), line=(r[3] or "").strip()) for r in rows]
 
 
 # ---------------------------------------------------------------- pairing
@@ -81,15 +84,16 @@ def pair(evs, cmap):
     for grp in sorted(by_obj.values(), key=lambda g: g[0]["ts"]):
         entries = sorted([e for e in grp if e["kind"] == "entry"], key=lambda e: e["ts"])
         exits = sorted([e for e in grp if e["kind"] == "exit"], key=lambda e: e["ts"])
-        if not entries or not exits:
-            continue
-        en = entries[0]
-        window = [x for x in exits if 0 < x["ts"] - en["ts"] <= PAIR_WINDOW]
-        if not window:
-            continue
-        ex = window[-1]                 # the last exit still inside the window
-        used |= {en["i"], ex["i"]}
-        moves.append(_move(en, ex, 1))
+        # Every entry, and the FIRST free exit after it: a tracker id that comes round
+        # twice is two movements, and taking the last exit in the window would both
+        # mis-time the first and leave the second unpairable by construction.
+        for en in entries:
+            ex = next((x for x in exits if x["i"] not in used
+                       and 0 < x["ts"] - en["ts"] <= PAIR_WINDOW), None)
+            if ex is None:
+                continue
+            used |= {en["i"], ex["i"]}
+            moves.append(_move(en, ex, 1))
 
     # ponytail: O(entries x exits) candidate scan. A site-day is thousands of events,
     # not millions; bucket by bin if a wave ever outgrows it.
@@ -148,7 +152,56 @@ def _merge(intervals):
     return out
 
 
-def coverage(ingest_root, date, site):
+def _ffprobe_s(path):
+    """True length of one segment, or None. Never raises: a missing ffprobe must cost
+    a warning on the coverage bar, not the whole count."""
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=20)
+        return float(out.stdout.strip())
+    except Exception:
+        return None
+
+
+def _durations(data_root, site, date, segs):
+    """Real segment lengths, cached per site-day. SEG_S is only the recorder's NOMINAL
+    length: a final segment truncated by a power failure would otherwise claim up to ten
+    minutes of footage that does not exist, and render a real gap as a hard zero.
+
+    segs: {cam: [(name, path), ...]} -> ({(cam, name): seconds}, any_estimated)."""
+    # Keyed by cam/name/size: two cameras start segments on the same wallclock second so
+    # bare filenames collide, and a re-pulled segment reuses its name with new bytes.
+    p = Path(data_root) / "segdur" / f"{site}-{date}.json" if data_root else None
+    try:
+        cache = json.loads(p.read_text())
+    except (OSError, ValueError, AttributeError):
+        cache = {}
+    # ponytail: serial probes, ~30 ms each. A full day is a few seconds on the first
+    # counts() after ingest and free thereafter; thread it if a site ever gets wide.
+    out, estimated, fresh = {}, False, False
+    for cam, files in segs.items():
+        for name, path in files:
+            k = f"{cam}/{name}:{path.stat().st_size}"
+            if k not in cache:
+                d = _ffprobe_s(path)
+                if d is None:
+                    estimated = True          # not cached: a retry may yet succeed
+                    out[(cam, name)] = float(SEG_S)
+                    continue
+                cache[k], fresh = d, True
+            out[(cam, name)] = float(cache[k])
+    if fresh and p:
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps(cache, indent=2))
+        except OSError:
+            pass
+    return out, estimated
+
+
+def coverage(ingest_root, date, site, data_root=None):
     """Recorded stretches per camera from the segment filenames, and the gaps between
     them. A gap must never render as a zero — that is the difference between 'no
     traffic' and 'no footage'."""
@@ -156,12 +209,18 @@ def coverage(ingest_root, date, site):
     # otherwise stretch the survey window six hours sideways and poison every gap.
     # Unset offsets fall back to 0 here — display-only; analysis is blocked anyway.
     offs = engine.offsets(ingest_root, date, site)
-    per_cam = {}
+    segs = {}
     for cam in engine.site_day_cams(ingest_root, date, site):
         d = Path(ingest_root) / date / site / cam
-        starts = sorted(engine.segment_epoch(p.name) + float(offs.get(cam, 0.0))
-                        for p in d.glob("*.mkv") if engine.SEG_NAME.match(p.name))
-        per_cam[cam] = {"recorded": _merge([[s, s + SEG_S] for s in starts])}
+        segs[cam] = sorted((p.name, p) for p in d.glob("*.mkv")
+                           if engine.SEG_NAME.match(p.name))
+    durs, estimated = _durations(data_root, site, date, segs)
+    per_cam = {}
+    for cam, files in segs.items():
+        off = float(offs.get(cam, 0.0))
+        spans = [[engine.segment_epoch(n) + off,
+                  engine.segment_epoch(n) + off + durs[(cam, n)]] for n, _ in files]
+        per_cam[cam] = {"recorded": _merge(spans)}
     spans = [r for c in per_cam.values() for r in c["recorded"]]
     window = [min(s for s, _ in spans), max(e for _, e in spans)] if spans else [0, 0]
     for cam, c in per_cam.items():
@@ -177,7 +236,8 @@ def coverage(ingest_root, date, site):
                  gaps_iso=[[bin_iso(s), bin_iso(e)] for s, e in gaps])
     expected = round((window[1] - window[0]) / 3600, 2)
     return {"window": window, "window_iso": [bin_iso(window[0]), bin_iso(window[1])],
-            "expected_hours": expected, "per_cam": per_cam}
+            "expected_hours": expected, "per_cam": per_cam,
+            "durations_estimated": estimated}
 
 
 def _covered(cov, cam, a, b):
@@ -239,7 +299,7 @@ def counts(site, date, data_root, ingest_root, config):
     cmap = class_map(config)
     evs = load_events(data_root, site, date)
     moves, leftovers = pair(evs, cmap)
-    cov = coverage(ingest_root, date, site)
+    cov = coverage(ingest_root, date, site, data_root)
 
     # Which camera owns each arm's entry line — that is the camera whose footage gap
     # makes an arm's bin unmeasured rather than empty.
@@ -261,6 +321,11 @@ def counts(site, date, data_root, ingest_root, config):
         if bin_start(e["ts"]) not in starts:
             starts.append(bin_start(e["ts"]))
     starts = sorted(set(starts))
+    if starts:
+        # Contiguous, always: _peak sums four ADJACENT entries, so a hole here would let
+        # it call four scattered bins a peak hour, and the bins table would quietly skip
+        # the missing quarters instead of showing them as unmeasured.
+        starts = list(range(starts[0], starts[-1] + 1, BIN_S))
 
     rows, totals = [], []
     for b in starts:
@@ -296,7 +361,9 @@ def counts(site, date, data_root, ingest_root, config):
     probe = probe_load((config.get("probe") or {}).get("dataset"), site)
     probe_out = None
     if probe is not None:
-        cells = [{"arm": a, "bin": t, "bin_start": bin_iso(t), **v}
+        # Provider arm names are folded to lower case at load; hand back the display
+        # casing the rest of the payload uses, or the overlay matches nothing.
+        cells = [{"arm": display.get(a, a), "bin": t, "bin_start": bin_iso(t), **v}
                  for (a, t), v in sorted(probe.items())]
         seen = [v["sample_n"] for (a, t), v in probe.items() if t in starts]
         probe_out = {"provider": (config.get("probe") or {}).get("provider") or "",
@@ -307,6 +374,17 @@ def counts(site, date, data_root, ingest_root, config):
 
     qa_pairing = pairing_qa(evs, moves)
     qa_pairing["flagged"] = read_flags(data_root, site, date)["count"]
+
+    cams = engine.site_day_cams(ingest_root, date, site)
+    offs = engine.offsets(ingest_root, date, site)
+    # A camera with footage but no active calibration skips analysis entirely and its arm
+    # simply vanishes from every table — name it rather than let the junction look smaller.
+    uncalibrated = []
+    for cam in cams:
+        try:
+            calib.get_calibration(site, cam)
+        except LookupError:
+            uncalibrated.append(cam)
     return {
         "site": site, "date": date,
         "bins": rows,
@@ -321,7 +399,10 @@ def counts(site, date, data_root, ingest_root, config):
         "qa": {"pairing": qa_pairing,
                "coverage": cov,
                "unmapped": unmapped,
-               "offsets": engine.offsets(ingest_root, date, site),
+               # Keyed on the cameras that HAVE footage, so an unset offset shows up as
+               # None. Keying on the offsets themselves can never report one missing.
+               "offsets": {cam: offs.get(cam) for cam in cams},
+               "uncalibrated": uncalibrated,
                "unpaired_per_cam": _leftover_qa(leftovers),
                "probe": probe_out},
     }

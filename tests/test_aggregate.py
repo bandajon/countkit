@@ -3,6 +3,8 @@
 
 import json
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -271,6 +273,114 @@ def offsets_round_trip():
                                         "offset_s": "soon"}).status_code == 400
 
 
+# ---- tier 1 pairs every entry, not just the first ----
+
+def tier1_walks_every_entry():
+    # One tracker id, two round trips through the junction. Taking the LAST exit in the
+    # window would time the first movement wrong and strand the second forever.
+    write([("cam1", 7, "car", GE, "entry", ts("10:00")),
+           ("cam1", 7, "car", CH, "exit", ts("10:00", 8)),
+           ("cam1", 7, "car", CH, "exit", ts("10:01", 40)),
+           ("cam1", 7, "car", GE, "entry", ts("10:01", 32))])
+    moves, leftover = aggregate.pair(aggregate.load_events(app.data_root(), SITE, DATE),
+                                     aggregate.class_map(app.CONFIG))
+    assert len(moves) == 2 and all(m["tier"] == 1 for m in moves), moves
+    assert sorted(m["dt"] for m in moves) == [8.0, 8.0], [m["dt"] for m in moves]
+    assert not leftover, leftover
+    r = run()["movements"]
+    assert r["tier1"] == 2 and r["unpaired"] == 0, r
+
+
+# ---- coverage trusts the footage, not the nominal segment length ----
+
+def a_truncated_segment_is_not_ten_minutes():
+    """A segment cut short by a power failure claims up to ten minutes of footage it
+    does not have — and a real gap then renders as a hard zero."""
+    d = TMP / "ingest" / DATE / SITE / "cam1"
+    segments("cam1", ["07:00"])
+    made = subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                           "color=c=black:s=64x64:d=3:r=5", "-c:v", "libx264",
+                           str(d / "20260804-070000.mkv")], capture_output=True)
+    assert made.returncode == 0, made.stderr[-400:]
+    cov = aggregate.coverage(TMP / "ingest", DATE, SITE, app.data_root())
+    s, e = cov["per_cam"]["cam1"]["recorded"][0]
+    assert 2.5 < e - s < 3.5, cov["per_cam"]["cam1"]      # three seconds, not six hundred
+    assert cov["durations_estimated"] is True, "cam2's empty stubs still fall back to 600"
+    cache = json.loads((app.data_root() / "segdur" / f"{SITE}-{DATE}.json").read_text())
+    assert any(k.startswith("cam1/20260804-070000.mkv:") and abs(v - 3) < .5
+               for k, v in cache.items()), cache
+    # Probed once: a second call answers from the cache even with ffprobe unusable.
+    real, subprocess.run = subprocess.run, lambda *a, **k: (_ for _ in ()).throw(OSError())
+    try:
+        again = aggregate.coverage(TMP / "ingest", DATE, SITE, app.data_root())
+    finally:
+        subprocess.run = real
+    assert again["per_cam"]["cam1"]["recorded"] == cov["per_cam"]["cam1"]["recorded"]
+    segments("cam1", ["07:00", "07:10"])
+
+
+# ---- the bin list is contiguous ----
+
+def bins_are_contiguous():
+    # No ingest tree for cam4, so the events alone decide the span: 07:05 and 08:05 with
+    # nothing between. Non-adjacent bins would let _peak call four scattered ones an hour.
+    segments("cam1", [])
+    segments("cam2", [])
+    write([("cam1", 1, "car", GE, "entry", ts("07:05")),
+           ("cam1", 2, "car", GE, "entry", ts("08:05"))])
+    starts = [b["ts"] for b in run()["bins"]]
+    assert starts == list(range(starts[0], starts[-1] + 1, aggregate.BIN_S)), starts
+    assert len(starts) == 5, [b["start"] for b in run()["bins"]]   # 07:00 .. 08:00
+    segments("cam1", ["07:00", "07:10"])
+    segments("cam2", ["07:00", "07:10"])
+
+
+# ---- QA names what is missing ----
+
+def qa_names_unset_offsets_and_uncalibrated_cams():
+    cam3 = TMP / "ingest" / DATE / SITE / "cam3"
+    cam3.mkdir(parents=True, exist_ok=True)
+    (cam3 / "20260804-070000.mkv").write_bytes(b"")
+    aggregate.set_offset(TMP / "ingest", DATE, SITE, "cam1", 0.0)
+    aggregate.set_offset(TMP / "ingest", DATE, SITE, "cam2", None)
+    try:
+        qa = run()["qa"]
+        # Keyed on the cameras that have footage: an unset offset must be able to show
+        # up as None, or the UI's "offsets all set" can never fail.
+        assert qa["offsets"] == {"cam1": 0.0, "cam2": None, "cam3": None}, qa["offsets"]
+        # cam3 has footage and no calibration, so it silently skips analysis and its arm
+        # vanishes from every table — say so rather than let the junction look smaller.
+        assert qa["uncalibrated"] == ["cam3"], qa["uncalibrated"]
+    finally:
+        shutil.rmtree(cam3)
+        aggregate.set_offset(TMP / "ingest", DATE, SITE, "cam1", 0.0)
+    assert run()["qa"]["uncalibrated"] == [], "all cameras calibrated -> empty list"
+
+
+# ---- arm naming ----
+
+def probe_cells_use_the_display_arm():
+    write([("cam1", 1, "car", GE, "entry", ts("07:05"))])
+    csv_path = TMP / "probe-case.csv"
+    csv_path.write_text("site,arm,bin_start_iso,delay_s,speed_kmh,sample_n\n"
+                        f"{SITE},{GE.upper()},2026-08-04T07:00:00+02:00,42.5,18.3,14\n"
+                        f"{SITE},Nowhere Rd,2026-08-04T07:00:00+02:00,1,1,1\n")
+    cfg = {**app.CONFIG, "probe": {"provider": "tomtom", "dataset": str(csv_path)}}
+    r = aggregate.counts(SITE, DATE, app.data_root(), TMP / "ingest", cfg)
+    arms = {c["arm"] for c in r["qa"]["probe"]["cells"]}
+    # The overlay matches probe cells to d.arms by string: a lowercased key never matches.
+    assert GE in arms, (arms, r["arms"])
+    assert "nowhere rd" in arms, "an arm the junction does not have keeps the raw key"
+
+
+def an_unstripped_arm_name_does_not_fork_a_column():
+    write([("cam1", 1, "car", GE, "entry", ts("07:05")),
+           ("cam1", 2, "car", GE + " ", "entry", ts("07:06"))])
+    r = run()
+    assert r["arms"].count(GE) == 1 and (GE + " ") not in r["arms"], r["arms"]
+    assert [b for b in r["bins"] if b["total"]][0]["arms"][GE]["total"] == 2, r["bins"]
+
+
 def api_serves_counts():
     write([("cam1", 1, "car", GE, "entry", ts("07:05"))])
     r = C.get(f"/api/counts/{SITE}/{DATE}")
@@ -294,6 +404,13 @@ check("a bin inside a footage gap is marked, not zero", gap_bins_are_marked)
 check("unknown class maps to other, PCU multiplies", unknown_class_and_pcu)
 check("probe joins on bins; absent dataset is null", probe_joins_and_absent_is_null)
 check("offset editor preserves the manifest; null unsets", offsets_round_trip)
+check("tier 1 pairs every entry with its own first exit", tier1_walks_every_entry)
+check("a truncated segment claims only the footage it has", a_truncated_segment_is_not_ten_minutes)
+check("the bin list has no holes", bins_are_contiguous)
+check("QA names unset offsets and uncalibrated cameras",
+      qa_names_unset_offsets_and_uncalibrated_cams)
+check("probe cells carry the display-cased arm", probe_cells_use_the_display_arm)
+check("an unstripped arm name does not fork a column", an_unstripped_arm_name_does_not_fork_a_column)
 check("counts route serves the UI payload", api_serves_counts)
 
 print(f"\n{'FAILED: ' + ', '.join(FAILS) if FAILS else 'all passed'}")

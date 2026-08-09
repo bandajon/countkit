@@ -6,7 +6,9 @@ Every number here traces back to the events table; nothing is editable by hand."
 import hashlib
 import json
 import shutil
+import tempfile
 import textwrap
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -28,6 +30,7 @@ LICENCE = ("licensed floating-car data — corroboration of survey timing and pe
            "not a second count")
 SCHEMATIC = ("arms without compass tags are placed in schematic order "
              "(arm name, clockwise from north) — turns are labelled by that order")
+GAPNOTE = "* excludes {n} no-footage bins — see coverage"
 
 
 def turn_of(entry_compass, exit_compass):
@@ -63,14 +66,46 @@ def _phf(d, arm, bins):
     return round(sum(v) / (4 * max(v)), 2) if v and max(v) else None
 
 
-def _heavy_pct(d):
-    tot = heavy = 0
+def _total(d, arm=None, bins=None):
+    """(entering total, number of no-footage bins it was summed over).
+
+    A gap bin genuinely contributes 0 events, so the sum is right — but the FIGURE is
+    not a measured total, and printing it bare contradicts the same sheet's 'no footage'
+    cells. Every caller marks the figure from the second number."""
+    gaps = 0
+    n = 0
     for b in d["bins"]:
+        if bins is not None and b["ts"] not in bins:
+            continue
+        cells = [b["arms"][arm]] if arm else list(b["arms"].values())
+        n += sum(c["total"] for c in cells)
+        gaps += any(c["gap"] for c in cells)
+    return n, gaps
+
+
+def _mark(v, gaps):
+    return f"{v}*" if gaps else v
+
+
+def _heavy_pct(d):
+    tot = heavy = gaps = 0
+    for b in d["bins"]:
+        gaps += any(c["gap"] for c in b["arms"].values())
         for arm in b["arms"].values():
             for c, n in arm["classes"].items():
                 tot += n
                 heavy += n if c in HEAVY else 0
-    return round(heavy / tot * 100, 1) if tot else 0.0
+    return (round(heavy / tot * 100, 1) if tot else 0.0), gaps
+
+
+def _cell(v):
+    """Arm and class names are operator input landing in a spreadsheet: openpyxl runs a
+    leading =/+/-/@ as a live formula, and refuses control characters outright at save —
+    which would kill the whole bundle over one stray character in a calibration."""
+    if not isinstance(v, str):
+        return v
+    s = "".join(ch for ch in v if ch >= " ")
+    return "'" + s if s[:1] in "=+-@" else s
 
 
 # ---------------------------------------------------------------- Excel
@@ -114,8 +149,8 @@ def _excel(path, d, config):
     ws = wb.create_sheet("Bins")
     head1, head2 = ["Bin"], [""]
     for a in arms:
-        head1 += [a] + [""] * len(classes)
-        head2 += classes + ["total"]
+        head1 += [_cell(a)] + [""] * len(classes)
+        head2 += [_cell(c) for c in classes] + ["total"]
     ws.append(head1)
     ws.append(head2)
     for c in ws[1] + ws[2]:
@@ -130,35 +165,48 @@ def _excel(path, d, config):
             else:
                 row += [cell["classes"].get(c, 0) for c in classes] + [cell["total"]]
         ws.append(row)
+    marked = False
     for label, period in (("AM peak", "am"), ("PM peak", "pm")):
         bins = _bins_in(d, period)
         if not bins:
             continue
-        rows_ = [b for b in d["bins"] if b["ts"] in bins]
         tot, phf = [label], ["PHF " + label]
         for a in arms:
-            tot += [""] * len(classes) + [sum(b["arms"][a]["total"] for b in rows_)]
+            n, g = _total(d, a, bins)
+            marked |= bool(g)
+            tot += [""] * len(classes) + [_mark(n, g)]
             phf += [""] * len(classes) + [_phf(d, a, bins)]
         ws.append(tot)
         ws.append(phf)
     day = ["Day total"]
     for a in arms:
-        day += [""] * len(classes) + [sum(b["arms"][a]["total"] for b in d["bins"])]
+        n, g = _total(d, a)
+        marked |= bool(g)
+        day += [""] * len(classes) + [_mark(n, g)]
     ws.append(day)
+    if marked:
+        ws.append([GAPNOTE.format(n=_total(d)[1])])
 
     ws = wb.create_sheet("Movements")
     for label, period in (("AM peak", "am"), ("PM peak", "pm"), ("Full day", "day")):
+        if period != "day" and not d["peaks"].get(period):
+            # An all-zero matrix reads as "nobody turned", which is a different claim
+            # from "this half-day never had a peak hour to report".
+            ws.append([f"no {period.upper()} peak recorded"])
+            ws.cell(ws.max_row, 1).font = bold
+            ws.append([])
+            continue
         cells = _cells(d, period)
         ws.append([f"{label} — entry (rows) x exit (cols)"])
         ws.cell(ws.max_row, 1).font = bold
-        ws.append(["entry \\ exit"] + arms)
+        ws.append(["entry \\ exit"] + [_cell(a) for a in arms])
         grid = {}
         for c in cells:
             g = grid.setdefault((c["entry"], c["exit"]), [0, 0])
             g[0] += c["count"]
             g[1] += c["tier2_count"]
         for en in arms:
-            row = [en]
+            row = [_cell(en)]
             for ex in arms:
                 n, inf = grid.get((en, ex), (0, 0))
                 row.append(f"{n} ({inf} inf)" if inf else n)
@@ -169,16 +217,27 @@ def _excel(path, d, config):
     ws.append(["Metric", "Value"])
     ws.cell(1, 1).font = bold
     ws.cell(1, 2).font = bold
+    marked = False
     for label, period in (("AM", "am"), ("PM", "pm")):
         p = d["peaks"].get(period)
+        n, g = _total(d, bins=_bins_in(d, period)) if p else (0, 0)
+        marked |= bool(g)
         ws.append([f"{label} peak start", p["start"] if p else "none"])
-        ws.append([f"{label} peak entering volume", p["total"] if p else 0])
+        ws.append([f"{label} peak entering volume", _mark(n, g)])
         ws.append([f"{label} peak PHF", p["phf"] if p else ""])
-    ws.append(["Day total entering", sum(b["total"] for b in d["bins"])])
-    ws.append(["% heavy (bus + heavy truck)", _heavy_pct(d)])
+    n, g = _total(d)
+    marked |= bool(g)
+    ws.append(["Day total entering", _mark(n, g)])
+    hv, hg = _heavy_pct(d)
+    marked |= bool(hg)
+    ws.append(["% heavy (bus + heavy truck)", _mark(hv, hg)])
     for a in arms:
-        ws.append([f"Entering {a}", sum(b["arms"][a]["total"] for b in d["bins"])])
-        ws.append([f"AM PHF {a}", _phf(d, a, _bins_in(d, "am")) or ""])
+        n, g = _total(d, a)
+        marked |= bool(g)
+        ws.append([f"Entering {_cell(a)}", _mark(n, g)])
+        ws.append([f"AM PHF {_cell(a)}", _phf(d, a, _bins_in(d, "am")) or ""])
+    if marked:
+        ws.append([GAPNOTE.format(n=_total(d)[1])])
     wb.save(path)
 
 
@@ -297,18 +356,27 @@ def _pdf(path, d, config):
     c.drawString(20 * mm, y, "Junction turning-movement survey · counts from camera "
                              "analysis · Africa/Lusaka")
 
-    _diagram(c, d, 20 * mm, y - 105 * mm, 100 * mm)
+    peak = d["peaks"].get("am")
+    if peak:
+        _diagram(c, d, 20 * mm, y - 105 * mm, 100 * mm)
+    else:
+        # A junction drawn with a zero on every arrow is a confident claim; there was
+        # simply no AM peak hour to draw.
+        c.setFont("Helvetica-Bold", 10)
+        c.drawString(20 * mm, y - 55 * mm, "no AM peak recorded")
 
     bx, by = 130 * mm, y - 30 * mm
-    peak = d["peaks"].get("am")
+    peak_n, peak_g = _total(d, bins=_bins_in(d, "am")) if peak else (0, 0)
+    heavy, heavy_g = _heavy_pct(d)
+    day_n, day_g = _total(d)
     c.setFont("Helvetica-Bold", 8)
     c.drawString(bx, by, "AM PEAK")
     c.setFont("Helvetica", 8)
     for i, line in enumerate([
             f"interval {peak['start'][11:16] if peak else '—'}",
-            f"total entering {peak['total'] if peak else 0}",
+            f"total entering {_mark(peak_n, peak_g)}",
             f"PHF {peak['phf'] if peak else '—'}",
-            f"% heavy {_heavy_pct(d)}",
+            f"% heavy {_mark(heavy, heavy_g)}",
             f"pairing {pr['rate']}% ({pr['inferred']}% inferred)",
             "arrows kerb-first (LHT)"]):
         c.drawString(bx, by - 5 * mm - i * 4.4 * mm, line)
@@ -317,10 +385,10 @@ def _pdf(path, d, config):
     # Headline numerals: the four figures a reader should get without reading anything.
     hy = by - 46 * mm
     for i, (num, cap) in enumerate([
-            (str(peak["total"] if peak else 0), "AM PEAK ENTERING"),
+            (str(_mark(peak_n, peak_g)), "AM PEAK ENTERING"),
             (str(peak["phf"] if peak else "—"), "PHF"),
-            (str(sum(b["total"] for b in d["bins"])), "DAY TOTAL"),
-            (f"{_heavy_pct(d)}%", "HEAVY")]):
+            (str(_mark(day_n, day_g)), "DAY TOTAL"),
+            (f"{heavy}%" + ("*" if heavy_g else ""), "HEAVY")]):
         ry = hy - i * 14 * mm
         c.setFont("Helvetica-Bold", 17)
         c.drawString(bx, ry, num)
@@ -331,28 +399,33 @@ def _pdf(path, d, config):
     c.setFont("Helvetica-Bold", 9)
     c.drawString(20 * mm, ty, "AM peak movement matrix")
     ty -= 6 * mm
-    grid = {}
-    for cell in _cells(d, "am"):
-        g = grid.setdefault((cell["entry"], cell["exit"]), [0, 0])
-        g[0] += cell["count"]
-        g[1] += cell["tier2_count"]
     arms = d["arms"]
     c.setFont("Helvetica", 7)
-    colw = min(28 * mm, (W - 60 * mm) / max(1, len(arms)))
-    c.drawString(20 * mm, ty, "entry \\ exit")
-    for j, ex in enumerate(arms):
-        c.drawString(52 * mm + j * colw, ty, ex[:16])
-    for i, en in enumerate(arms):
-        ry = ty - (i + 1) * 5 * mm
-        c.drawString(20 * mm, ry, en[:18])
+    if not peak:
+        c.drawString(20 * mm, ty, "no AM peak recorded")
+    else:
+        grid = {}
+        for cell in _cells(d, "am"):
+            g = grid.setdefault((cell["entry"], cell["exit"]), [0, 0])
+            g[0] += cell["count"]
+            g[1] += cell["tier2_count"]
+        colw = min(28 * mm, (W - 60 * mm) / max(1, len(arms)))
+        c.drawString(20 * mm, ty, "entry \\ exit")
         for j, ex in enumerate(arms):
-            n, inf = grid.get((en, ex), (0, 0))
-            c.drawString(52 * mm + j * colw, ry,
-                         f"{n} ({inf} inf)" if inf else str(n))
+            c.drawString(52 * mm + j * colw, ty, ex[:16])
+        for i, en in enumerate(arms):
+            ry = ty - (i + 1) * 5 * mm
+            c.drawString(20 * mm, ry, en[:18])
+            for j, ex in enumerate(arms):
+                n, inf = grid.get((en, ex), (0, 0))
+                c.drawString(52 * mm + j * colw, ry,
+                             f"{n} ({inf} inf)" if inf else str(n))
 
     fy = 24 * mm
     c.setFont("Helvetica", 6.5)
     notes = [METHOD]
+    if day_g:
+        notes.append(GAPNOTE.format(n=day_g))
     if not all((d.get("compass") or {}).get(a) for a in arms):
         notes.append(SCHEMATIC)
     # Largest by duration, not the last one of the day — the longest blind spell is the
@@ -395,9 +468,10 @@ def _probe_page(c, d, W, H):
                                       "(dashed). Corroboration of timing and peaks only.")
     top = y - 20 * mm
     for arm in d["arms"]:
-        # Probe rows are keyed by the provider's spelling of the arm, folded to lower
-        # case at load; the report's arm names keep their display casing.
-        cells = {x["bin"]: x for x in pr["cells"] if x["arm"] == arm.strip().lower()}
+        # A probe cell carries the display casing when the arm is known and the
+        # provider's raw key when it is not — fold both sides before matching.
+        cells = {x["bin"]: x for x in pr["cells"]
+                 if x["arm"].strip().lower() == arm.strip().lower()}
         vols = [b["arms"][arm]["total"] for b in d["bins"]]
         vmax = max(vols + [1])
         dmax = max([x["delay_s"] for x in cells.values()] + [1])
@@ -451,9 +525,19 @@ def build(site, date, data_root, ingest_root, config):
     if not any(b["total"] for b in d["bins"]):
         raise ValueError(f"{site} {date}: nothing analyzed — run it in Analyze first")
     out = bundle_dir(data_root, site, date)
-    tmp = out.with_name(out.name + ".tmp")
-    shutil.rmtree(tmp, ignore_errors=True)
-    tmp.mkdir(parents=True)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    # A unique staging dir per build: on a shared one, a concurrent build's bytes land
+    # under this build's manifest, and a hash that vouches for the wrong file is worse
+    # than no hash. Only stale dirs get swept — an hour old is a crash, not a rival.
+    prefix = out.name + ".tmp-"
+    for stale in out.parent.glob(prefix + "*"):
+        try:
+            if time.time() - stale.stat().st_mtime > 3600:
+                shutil.rmtree(stale, ignore_errors=True)
+        except OSError:
+            pass
+    tmp = Path(tempfile.mkdtemp(dir=out.parent, prefix=prefix))
+    tmp.chmod(0o755)               # mkdtemp is 0700; the bundle is a deliverable
     stem = f"countkit-{site}-{date}"
     _excel(tmp / f"{stem}.xlsx", d, config)
     _pdf(tmp / f"{stem}.pdf", d, config)
