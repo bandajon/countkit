@@ -40,14 +40,27 @@ docker/smoke.sh yolo                 # build, suite in-image, boot, poll /api/st
 docker compose --profile yolo up -d  # http://<host>:8090
 ```
 
-Smoke first, then up — smoke tears down the stack it starts. It also creates
-`config.yaml` (from the example) plus `ingest/` and `data/` if they're missing;
-going straight to `up` instead, create them yourself first, or Docker
-materialises those bind mounts as root-owned directories.
+One profile at a time — they all publish 8090.
+
+Smoke first, then up. Smoke tears down only a stack it started itself: find the
+service already running and it is left untouched and merely polled, because both
+`down` and a post-build `up -d` would kill a live analysis. It also creates
+`config.yaml` (from the example) plus `ingest/` and `data/` when they're
+missing. Going straight to `up` instead, create them yourself first — the bind
+mounts refuse to invent a missing source, so `up` fails outright rather than
+quietly filling a root-owned directory on the wrong disk.
 
 Set `detector: yolo` in `config.yaml` for the yolo profiles. The `ds-*` profiles
-set up TrafficCamNet on boot and print the `nvinfer_config:` line to paste into
-`config.yaml`.
+set up TrafficCamNet on boot and print an `nvinfer_config:` line — paste it into
+`config.yaml` **and** set `detector: deepstream`:
+
+```
+detector: deepstream
+nvinfer_config: /countkit/data/models/trafficcamnet/config_infer_trafficcamnet.txt
+```
+
+The example ships both keys empty, which selects the mock detector; the first
+Analyze then dies on the `fixtures/` tree, which is not in the image.
 
 ### First boot on a Jetson
 
@@ -72,6 +85,19 @@ on an external drive: put `INGEST_DIR=/media/<drive>/ingest` (and
 `DATA_DIR=/media/<drive>/countkit-data` — crops are the bulky part) in a `.env`
 file next to the compose file. Leave `ingest_root: ./ingest` in `config.yaml`
 alone; inside the container the path doesn't change.
+
+Mount that drive by UUID (`/dev/sda1` moves between boots) and before Docker
+wants it. `blkid` prints the UUID; in `/etc/fstab`:
+
+```
+UUID=<uuid>  /media/ssd  ext4  defaults,nofail,x-systemd.automount  0  2
+```
+
+`nofail` keeps the box booting with the drive out, `x-systemd.automount` mounts
+on first access instead of blocking boot. If the drive is absent anyway the `up`
+fails loudly and nothing is written to the boot device. To recover: mount the
+drive, then `docker compose --profile <p> up -d` again — a container that
+started before the mount cannot see it and must be restarted.
 
 No drive at the box? The R2 bucket doubles as footage transport. On the machine
 that has the footage, `python3 r2_ingest.py push <date> <site>`; on the
