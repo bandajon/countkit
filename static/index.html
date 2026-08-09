@@ -837,9 +837,10 @@ $('l-save').onclick = async () => {
   const r = await fetch(`/api/calib/${LAB.site}/${LAB.cam}`,
     { method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify(LAB.work) });
-  const body = await r.json();
   $('l-res').className = 'res ' + (r.ok ? 'good' : 'bad');
-  if (!r.ok) { $('l-res').textContent = body.detail; return; }
+  // A 500 answers text/plain, so the {detail} shape can never be assumed.
+  if (!r.ok) { $('l-res').textContent = await detail(r); return; }
+  const body = await r.json();
   LAB.dirty = false;
   $('l-res').textContent = `saved as v${body.version} — active from now on`;
   renderArmmap(body.armmap);
@@ -994,6 +995,14 @@ addEventListener('hashchange', () => { if (location.hash.slice(2) === 'analyze')
 if (location.hash.slice(2) === 'analyze') days();
 jobsPoll(); jobsStream();
 setInterval(() => { if (!es && location.hash.slice(2) === 'analyze') jobsPoll(); }, 5000);
+// A frame the server dropped (push queue full) is never re-sent, so a live stream can
+// leave a card frozen on RUNNING until reload. Resync from the list route on a slow
+// timer, connected or not — stale by 30s beats stale for good.
+setInterval(async () => {
+  if (location.hash.slice(2) !== 'analyze') return;
+  const r = await fetch('/api/analyze/jobs');
+  if (r.ok) renderJobs(await r.json());
+}, 30000);
 
 // ---------------- Counts tab: QA first, then the numbers ----------------
 const CNT = {site: '', date: '', data: null, cls: '', pcu: false, period: 'day', flags: []};
@@ -1018,7 +1027,9 @@ async function countsInit() {
   // never appears, per "with none configured, no probe UI appears anywhere".
   fetch('/api/corridor').then(r => r.json())
     .then(d => { $('c-corridor').hidden = !d.configured; }).catch(() => {});
-  const rows = await (await fetch('/api/ingest')).json();
+  const ri = await fetch('/api/ingest');
+  if (!ri.ok) { countsError(await detail(ri)); return; }
+  const rows = await ri.json();
   const opts = [];
   for (const r of rows) {
     const st = await (await fetch(`/api/analyze/status/${r.site}/${r.date}`)).json();
@@ -1031,12 +1042,27 @@ async function countsInit() {
   else $('qa').innerHTML = '<p class="empty">no analyzed site-days yet · run a job in Analyze first</p>';
 }
 
+// A failed load must never leave the previous site-day's numbers standing under the new
+// day's label: clear every counts surface first, then say what the server said.
+function countsError(msg) {
+  CNT.data = null; CNT.flags = [];
+  $('qa').innerHTML = `<p class="res bad">counts unavailable — ${esc(msg)}</p>`;
+  $('bintable').innerHTML = '';
+  $('sparks').innerHTML = '';
+  $('odtable').innerHTML = '';
+  $('drawer').hidden = true;
+}
+
 async function loadCounts() {
   const [site, date] = ($('c-day').value || '|').split('|');
   if (!site) return;
   CNT.site = site; CNT.date = date;
-  CNT.data = await (await fetch(`/api/counts/${site}/${date}`)).json();
-  CNT.flags = (await (await fetch(`/api/flags/${site}/${date}`)).json()).rows;
+  const rc = await fetch(`/api/counts/${site}/${date}`);
+  if (!rc.ok) { countsError(await detail(rc)); return; }
+  const rf = await fetch(`/api/flags/${site}/${date}`);
+  if (!rf.ok) { countsError(await detail(rf)); return; }
+  CNT.data = await rc.json();
+  CNT.flags = (await rf.json()).rows;
   const sel = $('c-class'), keep = CNT.cls;
   sel.innerHTML = '<option value="">all classes</option>'
     + CNT.data.classes.map(c => `<option${c === keep ? ' selected' : ''}>${c}</option>`).join('');
@@ -1103,9 +1129,12 @@ function qaPanel() {
 }
 
 async function offChips() {
-  const offs = await (await fetch(`/api/offsets/${CNT.site}/${CNT.date}`)).json();
   const box = $('offchips');
   if (!box) return;
+  const r = await fetch(`/api/offsets/${CNT.site}/${CNT.date}`);
+  if (!r.ok) { box.innerHTML = `<span class="res bad">offsets unavailable — `
+                             + `${esc(await detail(r))}</span>`; return; }
+  const offs = await r.json();
   box.innerHTML = '';
   for (const cam in offs) {
     const v = offs[cam], unset = v === null || v === undefined;
@@ -1135,7 +1164,7 @@ function offEditor(cam, cur) {
     box.className = 'res ' + (r.ok ? 'warn' : 'bad');
     box.textContent = r.ok
       ? 'changed offsets take effect on the next Analyze run — re-run the site-day'
-      : (await r.json()).detail;
+      : await detail(r);
     offChips();
   };
   box.appendChild(inp); box.appendChild(save);
@@ -1318,8 +1347,15 @@ function odMatrix() {
 
 async function drawer(entry, exit) {
   const keep = periodBins();
-  const r = await (await fetch(`/api/movements/${CNT.site}/${CNT.date}`
-    + `?entry=${encodeURIComponent(entry)}&exit=${encodeURIComponent(exit)}&limit=200`)).json();
+  const rm = await fetch(`/api/movements/${CNT.site}/${CNT.date}`
+    + `?entry=${encodeURIComponent(entry)}&exit=${encodeURIComponent(exit)}&limit=200`);
+  if (!rm.ok) {
+    $('dr-title').textContent = `${entry} → ${exit}`;
+    $('dr-rows').innerHTML = `<p class="res bad">no evidence loaded — ${esc(await detail(rm))}</p>`;
+    $('drawer').hidden = false;
+    return;
+  }
+  const r = await rm.json();
   const rows = r.movements.filter(m => keep.includes(m.bin)
                                   && (!CNT.cls || m.cls === CNT.cls)).slice(0, 30);
   const period = {am: 'AM peak', pm: 'PM peak', day: 'full day'}[CNT.period];
@@ -1349,11 +1385,19 @@ async function drawer(entry, exit) {
     b.textContent = flagged ? 'Flagged' : 'Flag';
     b.disabled = flagged;
     b.onclick = async () => {
-      await post('/api/flag', {site: CNT.site, date: CNT.date, entry, exit,
-                               bin: m.bin, entry_ts: m.entry_ts});
+      const fr = await post('/api/flag', {site: CNT.site, date: CNT.date, entry, exit,
+                                          bin: m.bin, entry_ts: m.entry_ts});
+      if (!fr.ok) {
+        b.textContent = 'Flag failed';
+        div.insertAdjacentHTML('beforeend',
+          `<span class="res bad">${esc(await detail(fr))}</span>`);
+        return;
+      }
       CNT.flags.push({entry_ts: m.entry_ts});
       b.textContent = 'Flagged'; b.disabled = true;
-      CNT.data = await (await fetch(`/api/counts/${CNT.site}/${CNT.date}`)).json();
+      const cr = await fetch(`/api/counts/${CNT.site}/${CNT.date}`);
+      if (!cr.ok) { countsError(await detail(cr)); return; }
+      CNT.data = await cr.json();
       qaPanel();                       // flags move QA copy, never a count
     };
     div.appendChild(b);
@@ -1452,15 +1496,19 @@ function showFiles(site, date, st) {
 }
 
 async function runExport(site, date) {
-  const btn = $('r-go');
+  const btn = $('r-go'), was = btn.textContent;
   btn.disabled = true; btn.textContent = 'Exporting…';
   const r = await post(`/api/report/${site}/${date}`, {});
-  btn.disabled = false; btn.textContent = 'Re-export';
+  btn.disabled = false;
   if (!r.ok) {
+    // Nothing was written: the button must not claim a first export happened, and the
+    // reason belongs beside it — a 500 answers text/plain, so detail() is the only read.
+    btn.textContent = was;
     $('r-res').className = 'res bad';
-    $('r-res').textContent = (await r.json()).detail;
+    $('r-res').textContent = 'export failed — ' + await detail(r);
     return;
   }
+  btn.textContent = 'Re-export';
   $('r-res').className = 'res';
   showFiles(site, date, await r.json());
 }
