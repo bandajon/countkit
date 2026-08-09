@@ -21,6 +21,10 @@ classes:
   - {model: heavy_truck, report: heavy_truck}
   - {model: motorcycle, report: motorcycle}
   - {model: bicycle, report: bicycle}
+  # COCO labels, as emitted by a stock YOLO model (car/truck/motorcycle/bicycle
+  # already appear above and need no second row):
+  # - {model: bus, report: bus}
+  # - {model: person, report: pedestrian}
 
 # Passenger-car-unit factors per report class, applied only when the PCU toggle is on.
 pcu:
@@ -32,9 +36,33 @@ pcu:
   motorcycle: 0.5
   bicycle: 0.5
 
+# Which detector backend runs the analysis:
+#   mock       replay fixtures — no GPU, no footage decoded
+#   yolo       OpenCV decode + an ultralytics model; any CUDA box, or a CPU slowly
+#   deepstream nvinfer + nvdcf on a Jetson with JetPack (needs nvinfer_config)
+# Absent = the legacy behaviour: nvinfer_config set picks deepstream, empty picks mock.
+# A backend that is named but unavailable is an error, never a quiet swap to another.
+detector: ""
+
 # DeepStream nvinfer config file. The model is configuration, not code — the same
 # CountKit runs on the RTX rig by pointing this elsewhere. Empty = mock detector.
 nvinfer_config: ""
+
+# Settings for detector: yolo. Ignored by the other backends.
+yolo:
+  # Ultralytics weights: a bundled name auto-downloads on first run, or a path to
+  # your own fine-tune. COCO labels (car, bus, truck, motorcycle, bicycle) reach the
+  # report through the classes table above.
+  # A bare name downloads once into <data_root>/models/, so it survives a container
+  # recreate; a path (./ or /) is used as given and downloads nothing.
+  model: yolo11s.pt
+  # Infer on every Nth decoded frame. 3 is ~10fps of a 30fps camera — enough for a
+  # crossing, a third of the GPU. Raise it if the box falls behind real time.
+  stride: 3
+  # Inference resolution. 960 keeps distant motorcycles; 640 is faster and blinder.
+  imgsz: 960
+  # Detection confidence floor. Below ~0.25 the tracker starts inventing vehicles.
+  conf: 0.3
 
 # Licensed floating-car dataset for corroboration only (never a second count).
 # provider e.g. tomtom; dataset is a path under data_root. Empty = no probe UI anywhere.

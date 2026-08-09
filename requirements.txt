@@ -1,6 +1,7 @@
 # pyds / DeepStream come from the Jetson JetPack image — never pip-installed here.
 # boto3 is optional: only needed when r2.enabled is true.
 fastapi
+httpx           # fastapi.testclient needs it, and the images run the suite as their smoke test.
 uvicorn
 pyyaml
 requests

@@ -1,0 +1,36 @@
+# CountKit on a DeepStream container — nvinfer + nvdcf through pyds.
+#   x86 (Blackwell native): nvcr.io/nvidia/deepstream:9.1-triton-multiarch
+#   Orin Nano / JetPack 6:  nvcr.io/nvidia/deepstream:7.1-triton-multiarch
+ARG BASE=nvcr.io/nvidia/deepstream:7.1-triton-multiarch
+FROM ${BASE}
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      ffmpeg python3-pip python3-gi python3-gst-1.0 \
+ && rm -rf /var/lib/apt/lists/*
+
+# gstreamer1.0-libav & friends: DS 9.1+ containers ship without them, and no
+# codec plugins means no decode of the operator's .mkv footage.
+RUN DS=/opt/nvidia/deepstream/deepstream; \
+    [ -f "$DS/user_additional_install.sh" ] && bash "$DS/user_additional_install.sh" || true
+
+COPY docker/install_pyds.sh docker/setup_model.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/install_pyds.sh /usr/local/bin/setup_model.sh \
+ && /usr/local/bin/install_pyds.sh
+
+WORKDIR /app
+COPY requirements.txt ./
+# ponytail: see Dockerfile.yolo — same PEP-668 fallback.
+RUN pip3 install --no-cache-dir -r requirements.txt \
+ || pip3 install --no-cache-dir --break-system-packages -r requirements.txt
+
+COPY *.py config.example.yaml ./
+COPY static/ ./static/
+COPY docs/ ./docs/
+COPY tests/ ./tests/
+
+ENV COUNTKIT_ROOT=/countkit \
+    PYTHONUNBUFFERED=1
+EXPOSE 8090
+# Model setup is advisory: an operator with their own nvinfer_config still gets a UI.
+CMD ["bash", "-c", "/usr/local/bin/setup_model.sh || echo '[countkit] model setup failed — set nvinfer_config in config.yaml yourself'; exec python3 app.py"]

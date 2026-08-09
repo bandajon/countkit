@@ -23,6 +23,32 @@ at the tree FieldKit's nvr_pull produces (`<date>/<site>/<cam>/*.mkv` with a
 set `nvinfer_config` and the same engine drives DeepStream
 (`deepstream_runner.py`). The RTX 5080 rig is that one config key, not a port.
 
+## Run in Docker
+
+The host needs only the NVIDIA driver and the container toolkit — the detector
+stack is in the image.
+
+| Profile | Hardware |
+| --- | --- |
+| `yolo` | any x86 NVIDIA GPU, incl. RTX 5080 (Blackwell) |
+| `yolo-jetson` | Orin Nano, JetPack 6 |
+| `ds-x86` | x86 via DeepStream 9.1 (native Blackwell) |
+| `ds-jetson` | Orin Nano via DeepStream 7.1 (the JetPack 6 pairing) |
+
+```
+docker/smoke.sh yolo                 # build, suite in-image, boot, poll /api/status, down again
+docker compose --profile yolo up -d  # http://<host>:8090
+```
+
+Smoke first, then up — smoke tears down the stack it starts. It also creates
+`config.yaml` (from the example) plus `ingest/` and `data/` if they're missing;
+going straight to `up` instead, create them yourself first, or Docker
+materialises those bind mounts as root-owned directories.
+
+Set `detector: yolo` in `config.yaml` for the yolo profiles. The `ds-*` profiles
+set up TrafficCamNet on boot and print the `nvinfer_config:` line to paste into
+`config.yaml`.
+
 ## The four tabs
 
 **Label** — draw ENTRY/EXIT gates over a camera's reference frame; the chevron

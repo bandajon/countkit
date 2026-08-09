@@ -20,6 +20,9 @@ import calib
 
 SEG_NAME = re.compile(r"^(\d{8}-\d{6})\.mkv$")     # FieldKit recorder wallclock segments
 RECROSS_S = 5.0            # media seconds a given obj may not re-cross the same line
+GAP_RESET_S = 30.0         # footage gap that drops tracker state: an id that survives the
+                           # gap would pair a position from either side of it and invent a
+                           # crossing timestamped inside uncovered time
 CROP_QUEUE = 2000          # crops buffered before the writer starts dropping
 BLOCKED = "{cam}: time offset unset — set it in Counts → Offsets. Unset is not zero."
 # A 1x1 JPEG. The mock has no frames to crop, but the row/file plumbing must be
@@ -201,6 +204,12 @@ def analyze(site, date, ingest_root, data_root, detector, progress=None, cancell
     say = progress or (lambda **k: None)
     stop = cancelled or (lambda: False)
 
+    # Build every detector before anything is deleted: a backend that cannot start (no
+    # GPU, missing weights) must leave the previous run's counts intact, not half-wipe
+    # them and fail.
+    dets = {cam: detector(site, date, cam) for cam in cams}
+    total = sum(len(d.segments) for d in dets.values()) or 1
+
     db = connect(data_root, site)
     db.execute("DELETE FROM events WHERE site=? AND date=?", (site, date))
     db.commit()
@@ -208,8 +217,6 @@ def analyze(site, date, ingest_root, data_root, detector, progress=None, cancell
     shutil.rmtree(crop_root / site / date, ignore_errors=True)
     crops = CropWriter(crop_root)
 
-    dets = {cam: detector(site, date, cam) for cam in cams}
-    total = sum(len(d.segments) for d in dets.values()) or 1
     done_segs, events = 0, 0
     try:
         for cam in cams:
@@ -219,16 +226,21 @@ def analyze(site, date, ingest_root, data_root, detector, progress=None, cancell
                 say(cam=cam, msg=f"{cam}: no calibration — skipped", pct=done_segs * 100 // total)
                 done_segs += len(dets[cam].segments)
                 continue
-            last_seen, last_cross, seg_now = {}, {}, None
+            last_seen, last_cross, seg_now, last_media = {}, {}, None, None
+            crop_for = getattr(dets[cam], "crop_for", None)
             for seg, t, objects in dets[cam]:
                 if stop():
                     raise Cancelled()
                 if seg != seg_now:
                     seg_now, base = seg, segment_epoch(seg)
+                    if last_media is not None and base - last_media > GAP_RESET_S:
+                        last_seen.clear()          # nothing seen before the gap may pair
+                        last_cross.clear()         # with anything seen after it
                     done_segs += 1
                     say(cam=cam, segment=seg, i=done_segs, n=total,
                         pct=done_segs * 100 // total, events=events,
                         msg=f"{cam}: {seg}")
+                last_media = base + t
                 ts = base + t + offs[cam]
                 for o in objects:
                     oid = o["id"]
@@ -248,7 +260,7 @@ def analyze(site, date, ingest_root, data_root, detector, progress=None, cancell
                         if not hit:
                             continue     # crossed against the gate's direction
                         crop = crops.put(_crop_key(site, date, cam, oid, ln["name"], ts),
-                                         PLACEHOLDER_JPEG)
+                                         _crop_bytes(crop_for, o))
                         db.execute("INSERT INTO events VALUES (?,?,?,?,?,?,?,?,?)",
                                    (site, date, cam, oid, o["cls"], ln["name"],
                                     ln["kind"], ts, crop))
@@ -266,6 +278,18 @@ def analyze(site, date, ingest_root, data_root, detector, progress=None, cancell
 
 class Cancelled(Exception):
     pass
+
+
+def _crop_bytes(crop_for, o):
+    """A detector that holds the frame may cut a real crop; one that cannot, or that
+    fails on a given object, degrades to the placeholder. A crop is evidence, not a
+    count — a broken encoder must never take down the site-day it illustrates."""
+    if crop_for is None:
+        return PLACEHOLDER_JPEG
+    try:
+        return crop_for(o) or PLACEHOLDER_JPEG
+    except Exception:
+        return PLACEHOLDER_JPEG
 
 
 def _bbox_centre(b):
