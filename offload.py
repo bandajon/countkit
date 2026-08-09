@@ -31,6 +31,28 @@ def sha256_b64(path):
     return base64.b64encode(h.digest()).decode()
 
 
+def make_client(o):
+    """Boto3 client for the R2 bucket, shared by the crop offload and the footage
+    transport (r2_ingest.py). Raises ValueError with operator-facing copy."""
+    missing = [k for k in ("account_id", "access_key_id", "secret_access_key")
+               if not o.get(k)]
+    if missing:
+        raise ValueError("config is missing: " + ", ".join(missing))
+    try:
+        import boto3
+        from botocore.config import Config
+    except ImportError:
+        raise ValueError("boto3 missing — pip install boto3")
+    return boto3.client(
+        "s3", endpoint_url=f"https://{o['account_id']}.r2.cloudflarestorage.com",
+        aws_access_key_id=o["access_key_id"],
+        aws_secret_access_key=o["secret_access_key"], region_name="auto",
+        # boto3 >= 1.36 adds its own CRC32 by default, which this S3-compatible
+        # endpoint rejects; send only the sha256 we compute.
+        config=Config(request_checksum_calculation="when_required",
+                      response_checksum_validation="when_required"))
+
+
 class Offload:
     def __init__(self, cfg, data_root):
         self.cfg = cfg              # the live CONFIG dict: config edits land without a reload
@@ -75,26 +97,12 @@ class Offload:
     def _get_client(self, o):
         if self.client is not None:
             return self.client
-        missing = [k for k in ("account_id", "access_key_id", "secret_access_key")
-                   if not o.get(k)]
-        if missing:
-            self.last_error = "r2.enabled but config is missing: " + ", ".join(missing)
-            return None
         try:
-            import boto3
-            from botocore.config import Config
-        except ImportError:
-            self.last_error = "r2.enabled but boto3 missing — pip install boto3"
+            self.client = make_client(o)
+        except ValueError as e:
+            self.last_error = f"r2.enabled but {e}"
             print(f"offload: {self.last_error}", flush=True)
             return None
-        self.client = boto3.client(
-            "s3", endpoint_url=f"https://{o['account_id']}.r2.cloudflarestorage.com",
-            aws_access_key_id=o["access_key_id"],
-            aws_secret_access_key=o["secret_access_key"], region_name="auto",
-            # boto3 >= 1.36 adds its own CRC32 by default, which this S3-compatible
-            # endpoint rejects; send only the sha256 we compute.
-            config=Config(request_checksum_calculation="when_required",
-                          response_checksum_validation="when_required"))
         return self.client
 
     def sweep(self):
