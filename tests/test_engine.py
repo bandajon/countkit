@@ -253,6 +253,59 @@ def api_reports_state():
     assert C.get("/api/analyze/jobs").status_code == 200
 
 
+# ---- the evidence-crop seam: a detector may cut its own crops, or not ----
+
+REAL_CROP = b"\xff\xd8real"
+
+
+class CropDetector(engine.MockDetector):
+    def crop_for(self, o):
+        return REAL_CROP
+
+
+class BrokenCropDetector(engine.MockDetector):
+    def crop_for(self, o):
+        raise RuntimeError("gst buffer gone")
+
+
+def run_with(cls):
+    return engine.analyze(SITE, DATE, TMP / "ingest", app.data_root(),
+                          lambda site, date, cam: cls(FIX, site, date, cam))
+
+
+def crop_bytes():
+    return [(app.data_root() / "crops" / r[6]).read_bytes() for r in rows()]
+
+
+def detector_crops_are_used():
+    build()
+    assert run_with(CropDetector)["events"] == 3
+    assert crop_bytes() == [REAL_CROP] * 3, "detector crop not written"
+
+
+def no_crop_for_falls_back():
+    run_with(engine.MockDetector)
+    assert crop_bytes() == [engine.PLACEHOLDER_JPEG] * 3, "placeholder not written"
+
+
+def a_failing_crop_does_not_stop_analysis():
+    assert run_with(BrokenCropDetector)["events"] == 3, "a raising crop_for lost events"
+    assert crop_bytes() == [engine.PLACEHOLDER_JPEG] * 3, "placeholder not written"
+
+
+def unknown_detector_fails_loudly():
+    app.CONFIG["detector"] = "nosuch"
+    try:
+        app.detector()
+        raise AssertionError("an unknown detector was silently accepted")
+    except ValueError as e:
+        assert "nosuch" in str(e), e
+    app.CONFIG["detector"] = "mock"
+    assert isinstance(app.detector()(SITE, DATE, "cam1"), engine.MockDetector)
+    del app.CONFIG["detector"]                        # absent = today's behaviour
+    assert isinstance(app.detector()(SITE, DATE, "cam1"), engine.MockDetector)
+
+
 check("chevron convention: counted traffic arrives on the arrow side", chevron_convention)
 check("crossing geometry: direction, dir flip, segment ends", geometry)
 check("segment filenames parse to wallclock", epochs)
@@ -265,6 +318,10 @@ check("unverified footage is refused", unverified_blocks)
 check("queue runs one job at a time", queue_serialises)
 check("a job caught RUNNING by a restart is re-run", survives_restart)
 check("status route reports blocked and event counts", api_reports_state)
+check("a detector's own crop bytes reach disk", detector_crops_are_used)
+check("a detector without crop_for gets the placeholder", no_crop_for_falls_back)
+check("a raising crop_for degrades to the placeholder", a_failing_crop_does_not_stop_analysis)
+check("an unknown detector: value fails loudly", unknown_detector_fails_loudly)
 
 print(f"\n{'FAILED: ' + ', '.join(FAILS) if FAILS else 'all passed'}")
 sys.exit(1 if FAILS else 0)

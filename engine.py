@@ -220,6 +220,7 @@ def analyze(site, date, ingest_root, data_root, detector, progress=None, cancell
                 done_segs += len(dets[cam].segments)
                 continue
             last_seen, last_cross, seg_now = {}, {}, None
+            crop_for = getattr(dets[cam], "crop_for", None)
             for seg, t, objects in dets[cam]:
                 if stop():
                     raise Cancelled()
@@ -248,7 +249,7 @@ def analyze(site, date, ingest_root, data_root, detector, progress=None, cancell
                         if not hit:
                             continue     # crossed against the gate's direction
                         crop = crops.put(_crop_key(site, date, cam, oid, ln["name"], ts),
-                                         PLACEHOLDER_JPEG)
+                                         _crop_bytes(crop_for, o))
                         db.execute("INSERT INTO events VALUES (?,?,?,?,?,?,?,?,?)",
                                    (site, date, cam, oid, o["cls"], ln["name"],
                                     ln["kind"], ts, crop))
@@ -266,6 +267,18 @@ def analyze(site, date, ingest_root, data_root, detector, progress=None, cancell
 
 class Cancelled(Exception):
     pass
+
+
+def _crop_bytes(crop_for, o):
+    """A detector that holds the frame may cut a real crop; one that cannot, or that
+    fails on a given object, degrades to the placeholder. A crop is evidence, not a
+    count — a broken encoder must never take down the site-day it illustrates."""
+    if crop_for is None:
+        return PLACEHOLDER_JPEG
+    try:
+        return crop_for(o) or PLACEHOLDER_JPEG
+    except Exception:
+        return PLACEHOLDER_JPEG
 
 
 def _bbox_centre(b):
