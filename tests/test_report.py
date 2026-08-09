@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
 import time
@@ -111,6 +112,12 @@ def bundle(name):
     return report.bundle_dir(app.data_root(), SITE, DATE) / name
 
 
+def staging():
+    """Per-build staging dirs, so one build never hashes another's bytes."""
+    out = report.bundle_dir(app.data_root(), SITE, DATE)
+    return sorted(p.name for p in out.parent.glob(out.name + ".tmp*"))
+
+
 def pdf_streams(raw):
     """The drawn text, decoded. ReportLab writes page content through
     /ASCII85Decode + /FlateDecode, so nothing is greppable in the raw file."""
@@ -140,7 +147,7 @@ def export_writes_a_bundle():
     assert r["ok"] and r["site"] == SITE and r["date"] == DATE, r
     assert set(r["files"]) == {f"{STEM}.xlsx", f"{STEM}.pdf"}, r["files"]
     assert Path(r["dir"]) == report.bundle_dir(app.data_root(), SITE, DATE), r["dir"]
-    assert not Path(r["dir"] + ".tmp").exists(), "the staging directory was left behind"
+    assert not staging(), f"staging directories were left behind: {staging()}"
 
 
 def manifest_hashes_verify():
@@ -161,7 +168,20 @@ def reexport_is_atomic_and_restamped():
     second = json.loads(bundle("manifest.json").read_text())
     assert second["generated_iso"] > first["generated_iso"], (first, second)
     assert set(second["files"]) == set(first["files"]), "re-export changed the file set"
-    assert not Path(str(report.bundle_dir(app.data_root(), SITE, DATE)) + ".tmp").exists()
+    assert not staging(), staging()
+    # A live rival build's staging dir must survive; only a crashed one is swept.
+    out = report.bundle_dir(app.data_root(), SITE, DATE)
+    rival = out.parent / (out.name + ".tmp-rival")
+    rival.mkdir()
+    (rival / "half-written.xlsx").write_bytes(b"PK")
+    build()
+    assert rival.exists(), "a concurrent build's staging directory was deleted"
+    old = out.parent / (out.name + ".tmp-crashed")
+    old.mkdir()
+    os.utime(old, (time.time() - 7200, time.time() - 7200))
+    build()
+    assert not old.exists(), "a two-hour-old staging directory was not swept"
+    shutil.rmtree(rival)
 
 
 # ---- Excel ----
@@ -199,10 +219,51 @@ def phf_matches_the_hand_computation():
     assert 100 in peak[1:], peak
     assert hand in phf[1:], (phf, hand)
     summary = {r[0]: r[1] for r in cell_rows(load_workbook(bundle(f"{STEM}.xlsx"))["Summary"])}
+    # The AM peak hour is wholly inside recorded footage, so its figures stand bare.
     assert summary["AM peak entering volume"] == 100, summary
     assert summary["AM peak PHF"] == hand, summary
-    assert summary["% heavy (bus + heavy truck)"] == 2.0, summary   # 2 buses in 100
-    assert summary[f"Entering {GE}"] == 100, summary
+    # Anything summed over the whole day crosses the 08:00–09:00 hole and must say so.
+    assert summary["% heavy (bus + heavy truck)"] == "2.0*", summary   # 2 buses in 100
+    assert summary[f"Entering {GE}"] == "100*", summary
+    assert summary["Day total entering"] == "100*", summary
+
+
+def a_day_total_over_a_gap_is_marked():
+    """A headline number that silently swallows the 08:00–09:00 hole contradicts the
+    same workbook's 'no footage' cells — every such figure carries a star and a note."""
+    wb = load_workbook(bundle(f"{STEM}.xlsx"))
+    for sheet in ("Bins", "Summary"):
+        flat = [str(v) for r in cell_rows(wb[sheet]) for v in r if v is not None]
+        note = [v for v in flat if v.startswith("* excludes")]
+        assert len(note) == 1, (sheet, note)
+        assert re.fullmatch(r"\* excludes \d+ no-footage bins — see coverage", note[0]), note
+        assert any(v.endswith("*") and v != note[0] for v in flat), (sheet, "nothing marked")
+    day = next(r for r in cell_rows(wb["Bins"]) if r[0] == "Day total")
+    assert "100*" in [str(v) for v in day[1:]], day
+    # The AM peak hour is wholly inside recorded footage: no star, a plain number.
+    peak = next(r for r in cell_rows(wb["Bins"]) if r[0] == "AM peak")
+    assert 100 in peak[1:], peak
+
+
+def a_missing_peak_is_named_not_zeroed():
+    """The fixture has no afternoon traffic. An all-zero PM matrix would claim nobody
+    turned; the truth is there was no PM peak hour at all."""
+    flat = [str(v) for r in cell_rows(load_workbook(bundle(f"{STEM}.xlsx"))["Movements"])
+            for v in r if v is not None]
+    assert "no PM peak recorded" in flat, flat
+    assert not any(v.startswith("PM peak — entry") for v in flat), flat
+    assert any(v.startswith("AM peak — entry") for v in flat), "the AM peak still renders"
+
+
+def a_formula_arm_name_cannot_execute_or_crash():
+    """Arm names are operator input. openpyxl runs a leading '=' as a live formula and
+    refuses control characters outright, killing the bundle over one stray byte."""
+    assert report._cell("=1+1") == "'=1+1"
+    for bad in ("+SUM(A1)", "-2", "@cmd"):
+        assert report._cell(bad).startswith("'"), bad
+    assert report._cell("North\x01 Rd\x1f") == "North Rd", report._cell("North\x01 Rd\x1f")
+    assert report._cell("Great East Rd") == "Great East Rd"
+    assert report._cell(7) == 7, "numbers pass through untouched"
 
 
 def an_inferred_cell_is_labelled():
@@ -317,6 +378,9 @@ check("re-export restamps and swaps in one move", reexport_is_atomic_and_restamp
 check("workbook opens with Method, Bins, Movements, Summary", excel_opens_with_the_four_sheets)
 check("a bin with no footage says so, never zero", a_gap_bin_says_no_footage)
 check("peak hour and PHF match the hand computation", phf_matches_the_hand_computation)
+check("a total spanning a gap is starred and footnoted", a_day_total_over_a_gap_is_marked)
+check("a half-day with no peak says so, never a zero grid", a_missing_peak_is_named_not_zeroed)
+check("a formula-shaped arm name is defused", a_formula_arm_name_cannot_execute_or_crash)
 check("an inferred movement is labelled in its cell", an_inferred_cell_is_labelled)
 check("PDF renders with the diagram, matrix and footnotes", pdf_is_a_real_pdf)
 check("probe attribution appears only with a dataset", probe_page_only_when_configured)

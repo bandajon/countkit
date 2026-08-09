@@ -1,0 +1,12 @@
+# The build context is tarred to the daemon before the first layer runs. On a field
+# box the checkout also holds the footage — sending tens of GB to build a 200 MB image.
+ingest/
+data/
+**/*.mkv
+
+.git/
+docs/superpowers/
+
+# The operator's own config and secrets: mounted at run time, never baked in.
+config.yaml
+.env

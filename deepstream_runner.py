@@ -55,7 +55,7 @@ class DeepStreamDetector:
         import pyds
 
         Gst.init(None)
-        for seg in self.segments:
+        for seg_index, seg in enumerate(self.segments):
             out = []          # the probe appends; the pipeline runs to EOS per segment
             pipe = Gst.parse_launch(
                 f'filesrc location="{self.dir / seg["file"]}" ! matroskademux ! '
@@ -70,14 +70,24 @@ class DeepStreamDetector:
                 fl = batch.frame_meta_list
                 while fl:
                     fm = pyds.NvDsFrameMeta.cast(fl.data)
+                    # Gates are calibrated in the camera's NATIVE pixels, but nvstreammux
+                    # scaled every frame to 1920x1080 — scale the boxes back, or every
+                    # count on a non-1080p camera uses displaced gates. (0 = unknown.)
+                    sx = (fm.source_frame_width or 1920) / 1920
+                    sy = (fm.source_frame_height or 1080) / 1080
                     objs, ol = [], fm.obj_meta_list
                     while ol:
                         om = pyds.NvDsObjectMeta.cast(ol.data)
                         r = om.rect_params
-                        objs.append({"id": om.object_id, "cls": om.obj_label,
-                                     "bbox": [r.left, r.top, r.width, r.height],
-                                     "centroid": [r.left + r.width / 2,
-                                                  r.top + r.height / 2]})
+                        left, top = r.left * sx, r.top * sy
+                        w, h = r.width * sx, r.height * sy
+                        # The tracker genuinely restarts with each segment's pipeline, so
+                        # ids recycle; cross-segment continuity would be fictional. Give
+                        # engine's per-id state a fresh id space per segment.
+                        objs.append({"id": seg_index * 1_000_000_000 + om.object_id,
+                                     "cls": om.obj_label,
+                                     "bbox": [left, top, w, h],
+                                     "centroid": [left + w / 2, top + h / 2]})
                         ol = ol.next
                     # pts is nanoseconds from the segment start — engine adds the
                     # segment's wallclock epoch and the camera's clock offset.
@@ -88,9 +98,20 @@ class DeepStreamDetector:
             pipe.get_by_name("sink").get_static_pad("sink").add_probe(
                 Gst.PadProbeType.BUFFER, probe)
             pipe.set_state(Gst.State.PLAYING)
-            pipe.get_bus().timed_pop_filtered(
-                Gst.CLOCK_TIME_NONE, Gst.MessageType.EOS | Gst.MessageType.ERROR)
+            # Bounded, and the message is read: a broken pipeline (wrong nvinfer config,
+            # h265 footage) otherwise yields zero frames and the run "succeeds" with no
+            # events after wiping the previous one, and a stall would wedge the
+            # one-at-a-time queue forever. Both must fail the job instead.
+            msg = pipe.get_bus().timed_pop_filtered(
+                15 * 60 * Gst.SECOND, Gst.MessageType.EOS | Gst.MessageType.ERROR)
             pipe.set_state(Gst.State.NULL)
+            if msg is None:
+                raise RuntimeError(f"{seg['file']}: DeepStream produced no end-of-stream "
+                                   "in 15 minutes — pipeline stalled")
+            if msg.type == Gst.MessageType.ERROR:
+                err, debug = msg.parse_error()
+                raise RuntimeError(f"{seg['file']}: DeepStream pipeline failed — "
+                                   f"{err.message} ({debug})")
             for frame in out:
                 yield frame
 

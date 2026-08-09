@@ -69,7 +69,9 @@ def local_ips():
 
 
 def _dir(key, default):
-    d = ROOT / CONFIG.get(key, default)
+    # `or default`: a null or blank key in a hand-edited config.yaml would otherwise
+    # raise on import and brick the next boot before any route can report it.
+    d = ROOT / (CONFIG.get(key) or default)
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -81,7 +83,7 @@ def data_root():
 def ingest_root():
     """Not created on demand: a missing ingest tree is a real condition to report
     (footage not copied yet), not something CountKit should paper over."""
-    return ROOT / CONFIG.get("ingest_root", "./ingest")
+    return ROOT / (CONFIG.get("ingest_root") or "./ingest")
 
 
 def gpu_temp_c():
@@ -107,7 +109,8 @@ if not CONFIG_PATH.exists():      # first boot
 load_config()
 calib.DATA_ROOT = data_root()
 
-SUBSCRIBERS = []     # one queue.Queue per open SSE client
+SUBSCRIBERS = []     # [queue, last-consumed epoch] per open SSE client
+SUBSCRIBER_STALE = 60
 
 
 def detector():
@@ -147,9 +150,16 @@ def jobs_changed():
     # Serialise now, not at yield time: the job dicts keep mutating, so a queued
     # reference would deliver the newest state under an older frame's timestamp.
     frame = json.dumps(JOBS.list())
-    for q in list(SUBSCRIBERS):
+    now = time.time()
+    for s in list(SUBSCRIBERS):
+        # A dropped connection never reaches the generator's finally, and the field UI
+        # reconnects every 5s — anything that stopped consuming is gone, drop it.
+        if now - s[1] > SUBSCRIBER_STALE:
+            if s in SUBSCRIBERS:
+                SUBSCRIBERS.remove(s)
+            continue
         try:
-            q.put_nowait(frame)
+            s[0].put_nowait(frame)
         except queue.Full:
             pass     # a stalled client must never slow the analysis down
 
@@ -223,6 +233,12 @@ def config_post(body: dict = Body(default={})):
     for k in ("pcu", "probe", "r2", "google_routes", "branding", "corridor"):
         if cfg.get(k) is not None and not isinstance(cfg[k], dict):
             raise HTTPException(400, f"'{k}' must be a mapping if present")
+    # Blanking one of these used to save fine and then 500 every route — and take the
+    # next boot down with it, since the module body resolves them at import.
+    for k in ("data_root", "ingest_root", "site_tz"):
+        if k in cfg and not (isinstance(cfg[k], str) and cfg[k].strip()):
+            raise HTTPException(400, f"'{k}' cannot be blank — give it a value or "
+                                     "remove the line to use the default")
     # Write the operator's text verbatim: a safe_dump round-trip would strip every comment.
     CONFIG_PATH.write_text(text)
     load_config()
@@ -230,8 +246,8 @@ def config_post(body: dict = Body(default={})):
 
 
 def _calib(fn, *a):
-    """calib speaks ValueError for operator error and LookupError for absent data;
-    both carry text the UI shows verbatim."""
+    """calib and aggregate speak ValueError for operator error and LookupError for
+    absent data; both carry text the UI shows verbatim."""
     try:
         return fn(*a)
     except ValueError as e:
@@ -276,9 +292,21 @@ def frame_get(site: str, cam: str):
                     media_type="image/jpeg")
 
 
+MAX_REFERENCE = 25 << 20
+
+
 @app.post("/api/frame/{site}/{cam}")
 async def frame_post(site: str, cam: str, request: Request):
-    return _calib(calib.save_reference, site, cam, await request.body())
+    # request.body() materialises the whole POST in the Orin's RAM, so refuse before
+    # reading — and again after, since a chunked body announces no length at all.
+    too_big = HTTPException(413, "reference photo too large — 25 MB max")
+    n = request.headers.get("content-length") or ""
+    if n.isdigit() and int(n) > MAX_REFERENCE:
+        raise too_big
+    data = await request.body()
+    if len(data) > MAX_REFERENCE:
+        raise too_big
+    return _calib(calib.save_reference, site, cam, data)
 
 
 @app.get("/api/analyze/jobs")
@@ -325,26 +353,30 @@ def analyze_status(site: str, date: str):
 @app.get("/api/analyze/stream")
 def analyze_stream():
     q = queue.Queue(maxsize=100)
-    SUBSCRIBERS.append(q)
+    sub = [q, time.time()]        # every successful yield refreshes the timestamp
+    SUBSCRIBERS.append(sub)
 
     def gen():
         try:
             yield f"data: {json.dumps(JOBS.list())}\n\n"     # current truth first
+            sub[1] = time.time()
             while True:
                 try:
-                    yield f"data: {q.get(timeout=15)}\n\n"
+                    frame = f"data: {q.get(timeout=15)}\n\n"
                 except queue.Empty:
-                    yield ": ping\n\n"    # keep idle proxies from closing the stream
+                    frame = ": ping\n\n"   # keep idle proxies from closing the stream
+                yield frame
+                sub[1] = time.time()
         finally:
-            if q in SUBSCRIBERS:
-                SUBSCRIBERS.remove(q)
+            if sub in SUBSCRIBERS:
+                SUBSCRIBERS.remove(sub)
 
     return StreamingResponse(gen(), media_type="text/event-stream")
 
 
 @app.get("/api/counts/{site}/{date}")
 def counts_get(site: str, date: str):
-    return aggregate.counts(site, date, data_root(), ingest_root(), CONFIG)
+    return _calib(aggregate.counts, site, date, data_root(), ingest_root(), CONFIG)
 
 
 CDN_BASE = ""     # Task 8 fills this in; empty means local crops only
@@ -391,7 +423,7 @@ def crop_get(key: str):
 
 
 CORRIDOR_TTL = 60
-_corridor_cache = {"at": 0.0, "payload": None}     # in memory only — see corridor_get()
+_corridor_cache = {"at": 0.0, "road": None, "payload": None}   # in memory only — see corridor_get()
 SPEEDS = {"NORMAL": 0, "SLOW": 1, "TRAFFIC_JAM": 2}
 
 
@@ -433,14 +465,17 @@ def corridor_get():
     base = {"configured": True, "road": road, "cross": cor.get("cross") or [],
             "junctions": cor.get("junctions") or []}
     now = time.time()
-    if _corridor_cache["payload"] and now - _corridor_cache["at"] < CORRIDOR_TTL:
+    # Keyed on the road: editing corridor.road would otherwise pair new geometry with
+    # the previous road's segments for the rest of the TTL.
+    if (_corridor_cache["payload"] and _corridor_cache["road"] == road
+            and now - _corridor_cache["at"] < CORRIDOR_TTL):
         return {**base, "segments": _corridor_cache["payload"]}
     try:
         segs = corridor_live(key, road)
     except Exception as e:
         # A dead key or no network is a missing glance, not a broken console.
         return {**base, "segments": [], "error": f"{type(e).__name__}: {e}"}
-    _corridor_cache.update(at=now, payload=segs)
+    _corridor_cache.update(at=now, road=road, payload=segs)
     return {**base, "segments": segs}
 
 
@@ -452,13 +487,13 @@ def corridor_page():
 @app.get("/api/movements/{site}/{date}")
 def movements_get(site: str, date: str, entry: str = None, exit: str = None,
                   bin: int = None, limit: int = 30):
-    return aggregate.movements_detail(site, date, data_root(), CONFIG,
-                                      entry, exit, bin, limit)
+    return _calib(aggregate.movements_detail, site, date, data_root(), CONFIG,
+                  entry, exit, bin, limit)
 
 
 @app.get("/api/flags/{site}/{date}")
 def flags_get(site: str, date: str):
-    return aggregate.read_flags(data_root(), site, date)
+    return _calib(aggregate.read_flags, data_root(), site, date)
 
 
 @app.post("/api/flag")

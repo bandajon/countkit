@@ -146,12 +146,42 @@ def empty_bucket_and_empty_tree_fail_loudly():
         assert "nothing to push" in str(e), e
 
 
+def a_hostile_key_writes_nothing_outside_the_tree():
+    escape = TMP / "dst-ingest"
+    hostile = f"ingest/{DATE}/{SITE}/../../../pwned.txt"      # lands in TMP, outside DST
+    R2.store[hostile] = b"owned"
+    try:
+        r2_ingest.pull(R2, "b", escape, DATE, SITE)
+        raise AssertionError("a key containing .. was accepted")
+    except SystemExit as e:
+        assert "escapes the ingest tree" in str(e), e
+    finally:
+        del R2.store[hostile]
+    assert not (TMP / "pwned.txt").exists(), "a bucket key wrote outside the ingest tree"
+
+
+def a_re_pull_drops_the_marker_until_the_new_files_land():
+    # The bucket grew a segment after the first pull; the local .verified matches by
+    # size, so only an explicit drop keeps a half-arrived tree from looking analyzable.
+    R2.order.clear()
+    R2.store[f"ingest/{DATE}/{SITE}/cam1/20260804-072000.mkv"] = b"o" * 512
+    marker = DST / DATE / SITE / ".verified"
+    assert marker.exists(), "test setup: the first pull should have planted the marker"
+    r2_ingest.pull(R2, "b", DST, DATE, SITE)
+    assert R2.order == [f"ingest/{DATE}/{SITE}/cam1/20260804-072000.mkv",
+                        f"ingest/{DATE}/{SITE}/.verified"], R2.order
+    assert marker.exists(), "the re-pull left the site-day unverified"
+
+
 check("push uploads the tree, .verified last", push_uploads_verified_last)
 check("a second push skips unchanged files", push_again_skips_everything)
 check("pull restores the tree byte-identical, .verified last", pull_restores_the_tree_verified_last)
 check("a second pull downloads nothing", pull_again_skips_everything)
 check("a corrupt download is refused and plants no marker", corrupt_download_plants_nothing)
 check("empty bucket and empty tree fail loudly", empty_bucket_and_empty_tree_fail_loudly)
+check("a bucket key containing .. is refused", a_hostile_key_writes_nothing_outside_the_tree)
+check("a re-pull re-plants .verified after the new files",
+      a_re_pull_drops_the_marker_until_the_new_files_land)
 
 print(f"\n{'FAILED: ' + ', '.join(FAILS) if FAILS else 'all passed'}")
 sys.exit(1 if FAILS else 0)

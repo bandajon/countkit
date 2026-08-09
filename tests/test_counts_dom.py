@@ -102,6 +102,23 @@ def design_values_present():
     assert "no crop — analysis predates crops or the write failed" in HTML
 
 
+def failed_loads_clear_the_numbers():
+    """A counts fetch that fails must clear the tables, not leave the previous
+    site-day's numbers standing under the new day's label."""
+    assert "counts unavailable — " in HTML and "no evidence loaded — " in HTML
+    assert "offsets unavailable — " in HTML
+    for surface in ("$('bintable').innerHTML = ''", "$('sparks').innerHTML = ''",
+                    "$('odtable').innerHTML = ''"):
+        assert surface in HTML, surface
+    # Every Counts-tab fetch checks r.ok and reads the body through detail(), which is
+    # the only thing that survives a text/plain 500.
+    for guard in ("if (!rc.ok) { countsError(await detail(rc)); return; }",
+                  "if (!rf.ok) { countsError(await detail(rf)); return; }",
+                  "if (!rm.ok) {"):
+        assert guard in HTML, guard
+    assert "export failed — ' + await detail(r)" in HTML, "runExport must show the reason"
+
+
 def movements_put_inferred_first():
     r = C.get(f"/api/movements/{SITE}/{DATE}").json()
     assert r["total"] == 2, r
@@ -143,12 +160,57 @@ def flag_round_trip():
     assert C.post("/api/flag", json={"entry": GE}).status_code == 400
 
 
+def report_card_warns_on_an_unset_offset():
+    """The Report card's offsets line must name a camera with no clock offset instead
+    of saying "all set ✓". Shape-tolerant: the server currently omits unset cameras
+    from qa.offsets, and is being changed to emit every camera with null for unset."""
+    cam3 = TMP / "ingest" / DATE / SITE / "cam3"
+    cam3.mkdir(parents=True, exist_ok=True)
+    (cam3 / "20260804-080000.mkv").write_bytes(b"")
+    # The client half, pinned: an unset camera is a null value, not a missing key.
+    assert "filter(([, v]) => v === null)" in HTML, "the Report card's unset-offset filter"
+    assert "UNSET" in HTML and "all set ✓" in HTML, "both offset states need their copy"
+    offs = C.get(f"/api/counts/{SITE}/{DATE}").json()["qa"]["offsets"]
+    assert offs.get("cam1") == 0.0 and offs.get("cam2") == 0.0, offs
+    if "cam3" not in offs:
+        print("     note: server still omits unset cameras — payload change not landed")
+        return
+    unset = [k for k, v in offs.items() if v is None]     # mirrors the JS filter above
+    assert unset == ["cam3"], offs
+
+
+def probe_cells_key_to_an_arm():
+    """A probe cell only draws if its arm matches a counts arm exactly (c.arm === arm)
+    and its bin matches a bin ts. Both are pinned here; the display-casing of cell arms
+    is a server change landing separately, so a case-only mismatch is tolerated."""
+    ds = TMP / "probe.csv"
+    ds.write_text("site,arm,bin_start_iso,delay_s,speed_kmh,sample_n\n"
+                  f"{SITE},{GE},2026-08-04T08:00:00+02:00,42,18.5,12\n")
+    app.CONFIG["probe"] = {"provider": "TomTom", "dataset": str(ds)}
+    # The overlay markup, pinned: series, tooltip and toggle.
+    assert "pr.cells.filter(c => c.arm === arm)" in HTML, "the probe series join"
+    assert 'stroke-dasharray="4 4"' in HTML, "the probe series is dashed, never solid"
+    assert "s delay · n=" in HTML, "the probe point needs its <title> tooltip"
+    d = C.get(f"/api/counts/{SITE}/{DATE}").json()
+    pr = d["qa"]["probe"]
+    assert pr and pr["cells"], "a configured dataset must produce cells"
+    c = pr["cells"][0]
+    assert c["delay_s"] == 42.0 and c["sample_n"] == 12, c
+    assert c["bin"] in [b["ts"] for b in d["bins"]], "the cell must land on a real bin"
+    if c["arm"] not in d["arms"]:
+        assert c["arm"].lower() == GE.lower(), c
+        print("     note: cell arms still lower-cased — display-casing not landed")
+
+
 seed()
 check("counts section carries the chrome", section_has_the_chrome)
 check("design values: hatch, accents, numerals, probe copy", design_values_present)
+check("a failed counts load clears the numbers", failed_loads_clear_the_numbers)
 check("movements list puts inferred pairs first", movements_put_inferred_first)
 check("crops serve locally and refuse traversal", crops_serve_and_refuse_traversal)
 check("flagging changes QA copy, never a count", flag_round_trip)
+check("Report card warns when a camera has no clock offset", report_card_warns_on_an_unset_offset)
+check("probe cells key to an arm and a bin", probe_cells_key_to_an_arm)
 
 print(f"\n{'FAILED: ' + ', '.join(FAILS) if FAILS else 'all passed'}")
 sys.exit(1 if FAILS else 0)

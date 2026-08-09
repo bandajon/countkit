@@ -51,7 +51,17 @@ def states_have_copy():
         assert s in HTML.lower(), s
 
 
+def save_failures_read_the_body_safely():
+    # A 500 answers text/plain, so `(await r.json()).detail` shows the operator nothing.
+    # detail() falls back to the status text; every save path must go through it.
+    assert "return (await r.json()).detail; } catch (e) { return r.statusText; }" in HTML
+    assert "if (!r.ok) { $('l-res').textContent = await detail(r); return; }" in HTML
+    assert "(await r.json()).detail" not in HTML.replace(
+        "return (await r.json()).detail;", ""), "an error path still assumes {detail}"
+
+
 check("Label section carries every control", controls_present)
+check("save failures read the body through detail()", save_failures_read_the_body_safely)
 check("Label calls the calibration routes", wired_to_the_backend)
 check("Label states carry their copy", states_have_copy)
 

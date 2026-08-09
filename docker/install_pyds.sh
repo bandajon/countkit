@@ -48,6 +48,11 @@ else
     SRC=/tmp/deepstream_python_apps
     rm -rf "$SRC"
     git clone --depth 1 https://github.com/NVIDIA-AI-IOT/deepstream_python_apps "$SRC"
+    # master is the only source for DS 9.x — no wheel is published and no tag tracks
+    # the release. Record WHICH master went into this image: without it a build that
+    # breaks tomorrow is neither reportable upstream nor reproducible here.
+    git -C "$SRC" rev-parse HEAD > /opt/countkit-pyds-rev
+    echo "[pyds] deepstream_python_apps master @ $(cat /opt/countkit-pyds-rev)"
     git -C "$SRC" submodule update --init --depth 1
     python3 "$SRC/bindings/3rdparty/git-partial-submodule/git-partial-submodule.py" restore-sparse
 
@@ -64,12 +69,14 @@ else
 fi
 
 python3 -c 'import pyds' || {
+    REV=$(cat /opt/countkit-pyds-rev 2>/dev/null || echo "n/a — prebuilt wheel path")
     cat >&2 <<EOF
 [pyds] FATAL: pyds still not importable after install on DeepStream $DS_VER.
        pyds is deprecated from DS 9.0 and the source build tracks the master
        branch of NVIDIA-AI-IOT/deepstream_python_apps, which may not yet support
-       this DeepStream release. Either pin a DeepStream base image with a
-       published wheel (7.1 or 8.0), or use the yolo profile.
+       this DeepStream release. Source revision built here: $REV
+       Either pin a DeepStream base image with a published wheel (7.1 or 8.0),
+       or use the yolo profile.
 EOF
     exit 1
 }

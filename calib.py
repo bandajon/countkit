@@ -9,7 +9,9 @@ from pathlib import Path
 
 DATA_ROOT = Path("./data")   # app.py repoints this at data_root(); moving it needs a restart
 
-NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")   # site/cam names become path segments
+# site/cam names become path segments; \Z not $, or "site1\n" validates and gets its
+# own identical-looking tree.
+NAME = re.compile(r"\A[A-Za-z0-9_-]{1,64}\Z")
 KINDS = ("entry", "exit")
 COMPASS = ("N", "S", "E", "W", "")
 
@@ -71,8 +73,18 @@ def save_calibration(site, cam, doc):
     _validate(doc)
     d = _cam_dir(site, cam)
     d.mkdir(parents=True, exist_ok=True)
-    n = max(_versions(d), default=0) + 1
-    (d / f"v{n}.json").write_text(json.dumps(doc, indent=2))
+    # Two saves land in FastAPI's threadpool at once and read the same highest version:
+    # "x" makes claiming a number atomic, and the loser simply takes the next one.
+    for _ in range(20):
+        n = max(_versions(d), default=0) + 1
+        try:
+            with open(d / f"v{n}.json", "x") as f:
+                f.write(json.dumps(doc, indent=2))
+            break
+        except FileExistsError:
+            continue
+    else:
+        raise ValueError("too many calibration saves at once — try again")
     (d / "active.json").write_text(json.dumps({"active": n}))
     return {"version": n}
 

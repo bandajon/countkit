@@ -6,8 +6,10 @@
 #   docker compose --profile ds-x86      up -d   # DeepStream 9.1 (Blackwell native)
 #   docker compose --profile ds-jetson   up -d   # DeepStream 7.1 (JetPack 6)
 #
+# One profile at a time: they all publish 8090.
+#
 # Before the first `up`: `cp config.example.yaml config.yaml && mkdir -p ingest data`
-# — a bind mount of a missing host path becomes a directory, not a file.
+# — every bind source must already exist, or the `up` fails (see below).
 #
 # Footage on an external drive: point the mounts there instead of the checkout,
 # either inline (INGEST_DIR=/media/ssd/ingest docker compose ...) or once in a
@@ -15,13 +17,28 @@
 #   INGEST_DIR=/media/ssd/ingest
 #   DATA_DIR=/media/ssd/countkit-data
 
+# create_host_path: false on every bind — unset is not zero, Docker edition. With the
+# short syntax a missing source (USB drive not mounted at boot) is silently created as
+# a root-owned directory on the boot device: footage reads empty, crops fill the eMMC,
+# and mounting the drive afterwards never reaches the running container. Failing the
+# `up` is the only outcome an operator can act on. docker/smoke.sh creates the default
+# no-drive paths first, so the checkout case still works.
 x-countkit: &countkit
   ports:
     - "8090:8090"
   volumes:
-    - ./config.yaml:/countkit/config.yaml
-    - ${INGEST_DIR:-./ingest}:/countkit/ingest
-    - ${DATA_DIR:-./data}:/countkit/data
+    - type: bind
+      source: ./config.yaml
+      target: /countkit/config.yaml
+      bind: {create_host_path: false}
+    - type: bind
+      source: ${INGEST_DIR:-./ingest}
+      target: /countkit/ingest
+      bind: {create_host_path: false}
+    - type: bind
+      source: ${DATA_DIR:-./data}
+      target: /countkit/data
+      bind: {create_host_path: false}
   restart: unless-stopped
 
 services:

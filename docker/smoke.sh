@@ -9,10 +9,21 @@ P="${1:?usage: smoke.sh <yolo|yolo-jetson|ds-x86|ds-jetson>}"
 SVC="countkit-$P"
 cd "$(dirname "$0")/.."
 
-# Compose materializes a missing bind source as a root-owned directory, and the app
-# treats a config.yaml directory as an existing config and crash-loops on it.
+# The compose binds refuse to create a missing source (see docker-compose.yaml), so
+# prepare the default no-drive paths here — and the SAME paths compose will use: with
+# INGEST_DIR/DATA_DIR pointing at a drive, creating ./ingest and ./data instead leaves
+# the real sources to Docker, which is the failure the guard exists for.
+if [ -f .env ]; then set -a; . ./.env; set +a; fi
 [ -f config.yaml ] || cp config.example.yaml config.yaml
-mkdir -p ingest data
+for d in "${INGEST_DIR:-ingest}" "${DATA_DIR:-data}"; do
+    [ -d "$d" ] && continue
+    # A relative path is the checkout's own; an absolute one is the operator's drive,
+    # and creating it here would put footage and crops on the boot device instead.
+    case "$d" in
+        /*) echo "== FAILED: $d does not exist — mount the drive, then re-run" >&2; exit 1 ;;
+        *)  mkdir -p "$d" ;;
+    esac
+done
 
 echo "== build $SVC"
 docker compose --profile "$P" build
@@ -21,15 +32,17 @@ echo "== tests inside the image"
 docker compose --profile "$P" run --rm --entrypoint bash "$SVC" \
     -c 'for t in tests/test_*.py; do echo "-- $t"; python3 "$t" || exit 1; done'
 
-echo "== boot"
-# Only tear down a stack this script started: `down` on the operator's own running
-# service kills a live analysis, and restart:unless-stopped won't bring it back.
+# A stack the operator started is never touched — not `down` (which kills a live
+# analysis; restart:unless-stopped won't bring it back) and not `up -d` either, which
+# recreates the container whenever the image changed, i.e. whenever the build above did
+# anything. The in-image test suite ran under `compose run`, which is safe alongside.
 WAS_UP=$(docker compose --profile "$P" ps -q "$SVC")
-docker compose --profile "$P" up -d
-if [ -z "$WAS_UP" ]; then
-    trap 'docker compose --profile "$P" down' EXIT
+if [ -n "$WAS_UP" ]; then
+    echo "== already running — left untouched; polling the live service"
 else
-    echo "== stack was already up — leaving it running"
+    echo "== boot"
+    docker compose --profile "$P" up -d
+    trap 'docker compose --profile "$P" down' EXIT
 fi
 
 for i in $(seq 60); do

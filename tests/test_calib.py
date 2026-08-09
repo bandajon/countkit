@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -151,6 +152,45 @@ def reference_frame_upload():
     assert r.headers["content-type"] == "image/jpeg"
 
 
+def concurrent_saves_both_survive():
+    # Handlers run in FastAPI's threadpool: read-then-write let both saves pick the same
+    # version number and one was silently overwritten.
+    start = threading.Barrier(2)
+    got = []
+
+    def save(name):
+        start.wait()
+        got.append(calib.save_calibration("race", "cam1", doc(gate("entry", name)))["version"])
+
+    ts = [threading.Thread(target=save, args=(n,)) for n in ("A", "B")]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert sorted(got) == [1, 2], got
+    d = TMP / "data" / "calibrations" / "race" / "cam1"
+    arms = sorted(json.loads((d / f"v{n}.json").read_text())["lines"][0]["name"]
+                  for n in (1, 2))
+    assert arms == ["A", "B"], f"a save was destroyed: {arms}"
+
+
+def a_trailing_newline_is_not_a_new_site():
+    for bad in ("site1\n", "cam1\n", "\n"):
+        try:
+            calib.get_calibration(bad, "cam1")
+            raise AssertionError(f"{bad!r} was accepted as a site name")
+        except ValueError:
+            pass
+    assert not (TMP / "data" / "calibrations" / "site1\n").exists()
+
+
+def an_oversize_reference_is_refused():
+    big = b"\xff\xd8" + b"x" * (25 << 20)
+    assert C.post("/api/frame/gerlache/cam1", content=big).status_code == 413
+    r = C.get("/api/frame/gerlache/cam1")          # the earlier upload is untouched
+    assert r.status_code == 200 and len(r.content) < 100, len(r.content)
+
+
 check("saves are versioned and never overwritten", versions_are_immutable)
 check("activate repoints without deleting", activate_repoints_only)
 check("invalid calibrations rejected with 400", invalid_docs_rejected)
@@ -158,6 +198,9 @@ check("path traversal in site/cam names rejected", path_traversal_rejected)
 check("arm map: owned / unowned / double / volumes-only note", armmap_states)
 check("missing calibration is 404, empty site is an empty map", missing_calibration_404)
 check("reference frame: upload wins, non-JPEG rejected", reference_frame_upload)
+check("two concurrent saves both survive as v1 and v2", concurrent_saves_both_survive)
+check("a name with a trailing newline is rejected", a_trailing_newline_is_not_a_new_site)
+check("an oversize reference photo is refused with 413", an_oversize_reference_is_refused)
 
 print(f"\n{'FAILED: ' + ', '.join(FAILS) if FAILS else 'all passed'}")
 sys.exit(1 if FAILS else 0)

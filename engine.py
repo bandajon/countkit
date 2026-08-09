@@ -110,7 +110,10 @@ def gate_crossing(line, prev, cur):
     for i in range(1, len(pts)):
         a, b = pts[i - 1], pts[i]
         if crosses(prev, cur, a, b):
-            return (side(a, b, cur) < 0) == inside_is_negative
+            # <= not <: a centroid landing exactly ON the line still crossed (crosses()
+            # needs prev strictly positive to fire here), so it arrived from the positive
+            # side — negative is the side it is arriving on.
+            return (side(a, b, cur) <= 0) == inside_is_negative
     return None
 
 
@@ -210,9 +213,11 @@ def analyze(site, date, ingest_root, data_root, detector, progress=None, cancell
     dets = {cam: detector(site, date, cam) for cam in cams}
     total = sum(len(d.segments) for d in dets.values()) or 1
 
+    # The DELETE and every INSERT are ONE transaction, committed only once the whole
+    # site-day has been read: a cancelled or crashed run must not leave a handful of
+    # events behind that read as a finished analysis.
     db = connect(data_root, site)
     db.execute("DELETE FROM events WHERE site=? AND date=?", (site, date))
-    db.commit()
     crop_root = Path(data_root) / "crops"
     shutil.rmtree(crop_root / site / date, ignore_errors=True)
     crops = CropWriter(crop_root)
@@ -267,8 +272,12 @@ def analyze(site, date, ingest_root, data_root, detector, progress=None, cancell
                         events += 1
         db.commit()
     finally:
+        # A no-op after the commit above; on any failure it puts the previous run's
+        # events back whole. Accepted corner: this run's crop FILES stay on disk as
+        # orphans and the restored events point at crops already rmtree'd, so they may
+        # render as missing images — the counts are what must survive, and they do.
+        db.rollback()
         crops.close()
-        db.commit()
         db.close()
     say(pct=100, events=events, msg=f"{events} events · {crops.written} crops"
         + (f" · {crops.dropped} dropped" if crops.dropped else ""))
@@ -311,6 +320,9 @@ class Jobs:
         self.path = Path(data_root) / "jobs.json"
         self.run, self.on_change = run, on_change or (lambda: None)
         self.lock = threading.Lock()
+        # Its own lock: _changed() is called from HTTP threads and the worker, some of
+        # them already holding self.lock, and two concurrent writers share one .tmp path.
+        self.save_lock = threading.Lock()
         self.jobs = []
         self.cancel_ids = set()
         self._load()
@@ -321,7 +333,10 @@ class Jobs:
     def _load(self):
         try:
             self.jobs = json.loads(self.path.read_text())
-        except (OSError, ValueError):
+        except OSError:
+            return                 # no queue yet, or an unreadable data dir
+        except ValueError:
+            print("jobs.json unreadable — starting with an empty queue", flush=True)
             return
         for j in self.jobs:
             if j["state"] == "RUNNING":
@@ -330,11 +345,12 @@ class Jobs:
 
     def _save(self):
         tmp = self.path.with_suffix(".tmp")
-        try:
-            tmp.write_text(json.dumps(self.jobs))
-            tmp.replace(self.path)
-        except OSError:
-            pass       # a read-only data dir must not kill a running analysis
+        with self.save_lock:
+            try:
+                tmp.write_text(json.dumps(self.jobs))
+                tmp.replace(self.path)
+            except OSError:
+                pass   # a read-only data dir must not kill a running analysis
 
     def _changed(self):
         self._save()

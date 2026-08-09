@@ -125,9 +125,15 @@ function say(msg) { $('state').textContent = msg; }
       .addTo(map).bindPopup(esc(c.name));
   });
 
-  // Newest analyzed day per site, so a junction popup can quote real numbers.
-  for (const r of await (await fetch('/api/ingest')).json())
-    if (!dates[r.site]) dates[r.site] = r.date;
+  // Newest ANALYZED day per site, so a junction popup can quote real numbers. The
+  // newest ingested day may have had no job run against it, and its zeroed QA line
+  // ("pairing 0%") is indistinguishable from a genuinely catastrophic day.
+  for (const r of await (await fetch('/api/ingest')).json()) {
+    if (dates[r.site]) continue;
+    const st = await (await fetch(`/api/analyze/status/${r.site}/${r.date}`))
+      .json().catch(() => ({}));
+    if (st.events) dates[r.site] = r.date;
+  }
 
   (d.junctions || []).forEach(j => {
     const at = d.road[j.i];
@@ -149,7 +155,7 @@ function popup(j) {
 async function fill(j, marker) {
   if (!j.site || !dates[j.site]) {
     if (j.site) marker.setPopupContent(popup(j).replace('reading counts…',
-      'no analyzed day for ' + esc(j.site) + ' yet'));
+      esc(j.site) + ' not analyzed yet — no counts to quote'));
     return;
   }
   const c = await (await fetch(`/api/counts/${j.site}/${dates[j.site]}`)).json();

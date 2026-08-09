@@ -32,6 +32,12 @@ class FakeClient:
 
     def __init__(self, fail=False):
         self.puts, self.fail = [], fail
+        self.present = {}        # key -> size already in the bucket
+
+    def head_object(self, Bucket, Key):
+        if Key not in self.present:
+            raise RuntimeError("An error occurred (404) calling HeadObject")
+        return {"ContentLength": self.present[Key]}
 
     def put_object(self, **kw):
         if self.fail:
@@ -143,6 +149,21 @@ def a_second_sweep_does_not_re_upload():
     assert o.client.puts == KEYS, "re-uploaded crops that were already verified"
 
 
+def a_key_already_in_the_bucket_survives_a_restart():
+    # The done-set is process-local: after a restart the HEAD is what stops the whole
+    # retained corpus going back up the field link.
+    o, d = rig(99.0)
+    o.client.present = {KEYS[0]: 10}          # a.jpg is 10 bytes, shipped last boot
+    o.sweep()
+    assert o.client.puts == [KEYS[1]], o.client.puts
+    assert o.uploaded == 1, o.info()
+    # A size that disagrees is not the same crop — upload it.
+    o2, _ = rig(99.0)
+    o2.client.present = {KEYS[0]: 9}
+    o2.sweep()
+    assert o2.client.puts == KEYS, o2.client.puts
+
+
 check("above the floor: uploads, never deletes", above_the_floor_uploads_but_never_deletes)
 check("a crop still being written is skipped", a_crop_still_being_written_is_left_alone)
 check("below the floor: deletes only what it verified", below_the_floor_deletes_what_it_verified)
@@ -151,6 +172,8 @@ check("a failed upload keeps the crop and surfaces the error", a_failed_upload_k
 check("enabled but unconfigured names the missing key", enabled_but_unconfigured_explains_itself)
 check("disabled is a silent no-op", disabled_is_a_no_op)
 check("an already-verified crop is not re-sent", a_second_sweep_does_not_re_upload)
+check("a crop already in the bucket is not re-uploaded after a restart",
+      a_key_already_in_the_bucket_survives_a_restart)
 
 print(f"\n{'FAILED: ' + ', '.join(FAILS) if FAILS else 'all passed'}")
 sys.exit(1 if FAILS else 0)

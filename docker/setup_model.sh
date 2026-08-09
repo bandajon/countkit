@@ -44,7 +44,7 @@ fi
 mkdir -p "$OUT"
 # A half-written config must never survive: the next run would find it, trust it,
 # and hand the operator a path to a model that isn't there.
-trap 'rm -f "$CFG"' ERR
+trap 'rm -f "$CFG" "$OUT"/*.part' ERR
 
 write_cfg "$BUNDLED"
 if [ -z "$(missing_files)" ]; then
@@ -55,8 +55,12 @@ else
     # files, so INT8 would fail at engine build; FP16 is the honest fallback.
     echo "[countkit] bundled model incomplete at $BUNDLED — fetching pruned_onnx_v1.0.4 from NGC"
     write_cfg "$OUT" '/^int8-calib-file=/d; s/^network-mode=.*/network-mode=2/'
+    # Download beside the target and rename: an interrupted curl leaves a partial file
+    # that the next boot's existence check accepts as a complete model, and the lie is
+    # only found much later, inside the TensorRT engine build.
     for p in $(missing_files); do
-        curl -fSL -o "$p" "$NGC/$(basename "$p")"
+        curl -fSL -o "$p.part" "$NGC/$(basename "$p")"
+        mv "$p.part" "$p"
     done
     echo "[countkit] model in $OUT, network-mode=2 (FP16 — no calibration table)"
 fi
