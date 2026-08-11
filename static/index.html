@@ -311,6 +311,22 @@
       <p class="empty">pick an analyzed site-day</p>
     </div>
 
+    <details class="panel" id="refine" style="margin-top:12px">
+      <summary>refine classes <span id="rf-chip"></span></summary>
+      <div class="sub">the detector cannot split LGV/MGV/HGV — a reviewer reads the crop and
+        says which. Refining a paired movement re-classes both crossings; tier-2 pairing
+        needs matching classes.</div>
+      <div class="row" style="margin:12px 0 8px">
+        <select id="rf-class" class="grow" aria-label="class to refine"></select>
+        <span class="sub mono" id="rf-count"></span>
+        <button class="btn" id="rf-prev" disabled>Prev</button>
+        <button class="btn" id="rf-next" disabled>Next</button>
+        <button class="btn go" id="rf-save" disabled>Save 0 refinements</button>
+      </div>
+      <div id="rf-grid"><p class="empty">pick an analyzed site-day</p></div>
+      <div class="res" id="rf-res"></div>
+    </details>
+
     <div class="eyebrow" style="margin:18px 0 8px">15-minute bins · entry crossings</div>
     <div class="panel tblwrap"><table class="bins" id="bintable"></table></div>
 
@@ -1050,6 +1066,7 @@ function countsError(msg) {
   $('bintable').innerHTML = '';
   $('sparks').innerHTML = '';
   $('odtable').innerHTML = '';
+  $('rf-grid').innerHTML = '';
   $('drawer').hidden = true;
 }
 
@@ -1068,6 +1085,7 @@ async function loadCounts() {
     + CNT.data.classes.map(c => `<option${c === keep ? ' selected' : ''}>${c}</option>`).join('');
   CNT.cls = sel.value;
   $('drawer').hidden = true;
+  refineSync();
   renderAll();
 }
 
@@ -1169,6 +1187,103 @@ function offEditor(cam, cur) {
   };
   box.appendChild(inp); box.appendChild(save);
 }
+
+// ---------------- Refine classes: a human splits what the detector cannot ----------------
+// Stock detectors emit one goods_vehicle; the TOR wants LGV/MGV/HGV. Until a fine-tune
+// lands, a reviewer reads the evidence crop and says which. Staged locally, saved as a batch.
+const RF = {cls: '', off: 0, staged: new Map()};
+const rfKey = e => [e.cam, e.obj_id, e.line, e.kind, e.ts].join('|');
+// A tier-2 pair holds only while both crossings carry the same class, so a refinement
+// travels with its exit — refine one side alone and the movement unpairs.
+function refineRows(staged) {
+  const rows = [];
+  for (const {ev, to} of staged.values())
+    for (const x of [ev, ev.paired]) if (x)
+      rows.push({cam: x.cam, obj_id: x.obj_id, line: x.line, kind: x.kind, ts: x.ts, to});
+  return rows;
+}
+
+// The targets are not in the counts payload: config's pcu table names every report class,
+// so its keys plus the classes present are the list. The server validates authoritatively
+// and its 400 names the allowed list, so a stale button here is a message, not a bad write.
+const refineTargets = () =>
+  [...new Set([...Object.keys(CNT.data.pcu_factors || {}), ...CNT.data.classes])];
+
+function refineSync() {
+  const n = CNT.data.qa.refined || 0;
+  $('rf-chip').innerHTML = n ? `<span class="chip">${n} refined</span>` : '';
+  const sel = $('rf-class'), keep = RF.cls;
+  sel.innerHTML = CNT.data.classes
+    .map(c => `<option${c === keep ? ' selected' : ''}>${esc(c)}</option>`).join('');
+  RF.cls = sel.value; RF.off = 0; RF.staged.clear();
+  refineSaveLabel();
+  if ($('refine').open) refineGrid();
+}
+
+function refineSaveLabel() {
+  $('rf-save').disabled = !RF.staged.size;
+  $('rf-save').textContent = `Save ${RF.staged.size} refinement`
+    + (RF.staged.size === 1 ? '' : 's');
+}
+
+function refineRes(kind, msg) {
+  $('rf-res').className = 'res ' + kind;
+  $('rf-res').textContent = msg;
+}
+
+async function refineGrid() {
+  const box = $('rf-grid');
+  if (!CNT.data || !RF.cls) { box.innerHTML = '<p class="empty">pick an analyzed site-day</p>'; return; }
+  box.innerHTML = '<p class="empty">reading evidence…</p>';
+  const r = await fetch(`/api/refine/events/${CNT.site}/${CNT.date}`
+    + `?cls=${encodeURIComponent(RF.cls)}&limit=30&offset=${RF.off}`);
+  if (!r.ok) { box.innerHTML = ''; refineRes('bad', `evidence unavailable — ${await detail(r)}`); return; }
+  const d = await r.json();
+  $('rf-count').textContent = d.total
+    ? `${RF.off + 1}–${RF.off + d.events.length} of ${d.total}`
+    : 'nothing to refine in this class';
+  $('rf-prev').disabled = RF.off === 0;
+  $('rf-next').disabled = RF.off + d.events.length >= d.total;
+  box.innerHTML = d.events.length ? '' : '<p class="empty">nothing to refine in this class</p>';
+  const targets = refineTargets();
+  for (const e of d.events) {
+    const div = document.createElement('div');
+    div.className = 'mv';
+    const clock = t => CAT.format(new Date(t * 1000));
+    div.innerHTML = cropFig(e.crop, e.cam, clock(e.ts))
+      + (e.paired ? cropFig(e.paired.crop, e.paired.cam, clock(e.paired.ts))
+                  : `<span class="sub">unpaired entry</span>`)
+      + `<span class="sub">${esc(e.cls)}${e.refined ? ' · refined' : ''} · rc ${esc(e.rc)}</span>`
+      + `<span class="seg" style="margin-left:auto">`
+      + targets.map(t => `<button class="btn" data-to="${esc(t)}">${esc(t)}</button>`).join('')
+      + '</span>';
+    const mark = () => {
+      const to = RF.staged.has(rfKey(e)) ? RF.staged.get(rfKey(e)).to : null;
+      div.querySelectorAll('button[data-to]')
+         .forEach(b => b.classList.toggle('on', b.dataset.to === to));
+    };
+    div.querySelectorAll('button[data-to]').forEach(b => b.onclick = () => {
+      RF.staged.set(rfKey(e), {ev: e, to: b.dataset.to});
+      mark(); refineSaveLabel();
+    });
+    mark();                            // a card revisited by paging keeps its staging
+    box.appendChild(div);
+    div.querySelectorAll('img[data-key]').forEach(loadCrop);
+  }
+}
+
+$('refine').ontoggle = () => { if ($('refine').open && CNT.data) refineGrid(); };
+$('rf-class').onchange = () => { RF.cls = $('rf-class').value; RF.off = 0; refineGrid(); };
+$('rf-prev').onclick = () => { RF.off = Math.max(0, RF.off - 30); refineGrid(); };
+$('rf-next').onclick = () => { RF.off += 30; refineGrid(); };
+$('rf-save').onclick = async () => {
+  const rows = refineRows(RF.staged);
+  if (!rows.length) return;
+  const r = await post('/api/refine', {site: CNT.site, date: CNT.date, rows});
+  if (!r.ok) { refineRes('bad', await detail(r)); return; }
+  refineRes('good', `${(await r.json()).count} crossings re-classed`);
+  await loadCounts();                  // refineSync clears the staging and redraws the grid
+};
 
 $('c-day').onchange = loadCounts;
 $('c-class').onchange = () => { CNT.cls = $('c-class').value; renderAll(); };
@@ -1366,17 +1481,9 @@ async function drawer(entry, exit) {
   for (const m of rows) {
     const div = document.createElement('div');
     div.className = 'mv';
-    // Fetched rather than set as src: only the response tells us whether the bytes
-    // came off this disk or were redirected to the CDN copy, and provenance is
-    // part of the evidence.
-    const shot = (key, cam, clock) => key
-      ? `<figure><img data-key="${key}" alt="" loading="lazy">`
-        + `<figcaption>${cam} · ${clock}<span class="prov"></span></figcaption></figure>`
-      : `<figure><div class="nocrop">no crop — analysis predates crops or the write`
-        + ` failed</div><figcaption>${cam} · ${clock}</figcaption></figure>`;
     const flagged = CNT.flags.some(f => f.entry_ts === m.entry_ts);
-    div.innerHTML = shot(m.crops[0], m.entry_cam, m.entry_clock)
-      + shot(m.crops[1], m.exit_cam, m.exit_clock)
+    div.innerHTML = cropFig(m.crops[0], m.entry_cam, m.entry_clock)
+      + cropFig(m.crops[1], m.exit_cam, m.exit_clock)
       + `<span class="state ${m.tier === 2 ? 's-warn' : 's-ok'}">`
       + `${m.tier === 2 ? 'inferred' : 'same camera'}</span>`
       + `<span class="sub">${esc(m.cls)} · Δt ${m.dt}s · ${m.bin_start.slice(11, 16)}</span>`;
@@ -1407,6 +1514,14 @@ async function drawer(entry, exit) {
   $('drawer').hidden = false;
   $('drawer').scrollIntoView({block: 'nearest'});
 }
+
+// Fetched rather than set as src: only the response tells us whether the bytes came off
+// this disk or were redirected to the CDN copy, and provenance is part of the evidence.
+const cropFig = (key, cam, clock) => key
+  ? `<figure><img data-key="${key}" alt="" loading="lazy">`
+    + `<figcaption>${cam} · ${clock}<span class="prov"></span></figcaption></figure>`
+  : `<figure><div class="nocrop">no crop — analysis predates crops or the write`
+    + ` failed</div><figcaption>${cam} · ${clock}</figcaption></figure>`;
 
 // A crop offloaded to R2 comes back as a redirect to the CDN. Same picture, different
 // custody — label it, because a reviewer should know which copy they are looking at.
