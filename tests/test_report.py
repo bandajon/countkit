@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT))
 TMP = Path(tempfile.mkdtemp(prefix="countkit-rep-")).resolve()
 os.environ["COUNTKIT_ROOT"] = str(TMP)
 
+import aggregate                                 # noqa: E402
 import app                                       # noqa: E402
 import calib                                     # noqa: E402
 import engine                                    # noqa: E402
@@ -140,6 +141,18 @@ def cell_rows(ws):
     return [[c.value for c in row] for row in ws.iter_rows()]
 
 
+def payload():
+    """The counts payload the bundle is built from, for cases the fixture cannot reach
+    without recalibrating the site out from under every other test."""
+    return aggregate.counts(SITE, DATE, app.data_root(), app.ingest_root(), app.CONFIG)
+
+
+def sheet(d, name):
+    path = TMP / f"{name}.xlsx"
+    report._excel(path, d, app.CONFIG)
+    return lambda s: cell_rows(load_workbook(path)[s])
+
+
 # ---- the bundle ----
 
 def export_writes_a_bundle():
@@ -188,7 +201,8 @@ def reexport_is_atomic_and_restamped():
 
 def excel_opens_with_the_four_sheets():
     wb = load_workbook(bundle(f"{STEM}.xlsx"))
-    assert wb.sheetnames == ["Method", "Bins", "Movements", "Summary"], wb.sheetnames
+    assert wb.sheetnames == ["Method", "Bins", "Hourly", "Movements", "Turns",
+                             "Summary"], wb.sheetnames
     method = {r[0]: r[1] for r in cell_rows(wb["Method"]) if r and r[0]}
     assert method["Site"] == SITE and method["Date"] == DATE, method
     assert "two-tier" in method["Method"] and "inferred share" in method["Method"], method
@@ -272,6 +286,115 @@ def an_inferred_cell_is_labelled():
     assert "1 (1 inf)" in flat, [v for v in flat if v]
     assert any(str(v).startswith("AM peak — entry") for v in flat), flat[:8]
     assert any(str(v).startswith("Full day — entry") for v in flat), "day block missing"
+
+
+def hourly_rolls_the_quarter_hours_up():
+    """The TOR asks for 15-minute intervals aggregated on an hourly basis."""
+    rows = cell_rows(load_workbook(bundle(f"{STEM}.xlsx"))["Hourly"])
+    by = {r[0]: r for r in rows[2:]}
+    assert "07:00" in by, sorted(str(k) for k in by)
+    hour = by["07:00"]
+    assert hour[-1] == 100, hour            # 40+30+20+10 over the four 07:xx bins
+    assert 100 in hour[1:-1], hour          # on the arm that carried them
+    assert 2 in hour[1:-1], hour            # the two buses roll up in their class column
+    gap = by["08:00"]                       # 08:00-09:00 is the hole in the footage
+    assert all(str(v).endswith("*") for v in gap[1:]), gap
+    note = [str(v) for r in rows for v in r if str(v).startswith("* excludes")]
+    assert len(note) == 1, note
+
+
+def turns_sheet_splits_left_through_right():
+    # Hard case, not read back off the build: entering from the north arm and leaving
+    # by the east arm is a LEFT turn under left-hand traffic.
+    assert report.turn_of("N", "E") == "left"
+    rows = cell_rows(load_workbook(bundle(f"{STEM}.xlsx"))["Turns"])
+    head = next(r for r in rows if r[0] == "Hour")
+    left = head.index("Left")
+    hour = next(r for r in rows if r[0] == "07:00" and r[1] == GE)
+    assert hour[left] == "1 (1 inf)", hour        # the one cross-camera pair, N -> E
+    assert hour[-1] == 1 and hour[left + 1] == 0, hour
+    cls = payload()["movements"]["od"][0]["cls"]   # whatever the class map calls a car
+    byclass = next(r for r in rows if r[0] == GE and r[1] == cls)
+    assert byclass[left] == "1 (1 inf)", byclass
+    flat = [str(v) for r in rows for v in r if v is not None]
+    assert "no PM peak recorded" in flat, "a missing peak must be named here too"
+    assert any(v.startswith("Full day — turning") for v in flat), flat
+
+
+def untagged_arms_fall_back_to_schematic_order():
+    d = payload()
+    d["compass"] = {a: "" for a in d["arms"]}
+    rows = sheet(d, "schematic")("Turns")
+    flat = [str(v) for r in rows for v in r if v is not None]
+    assert report.SCHEMATIC in flat, flat[-3:]
+    # Clockwise from north by arm name: Church Rd takes N, Great East Rd takes E — so
+    # the same movement now reads as a right turn, and it is labelled, not dropped.
+    head = next(r for r in rows if r[0] == "Hour")
+    hour = next(r for r in rows if r[0] == "07:00" and r[1] == GE)
+    assert hour[head.index("Right")] == "1 (1 inf)", hour
+    assert hour[head.index("Left")] == 0, hour
+
+
+def a_gap_or_part_hour_is_starred_in_turns():
+    """A turning volume over the 08:00-09:00 hole, or over an edge hour the survey only
+    clips, is not a measured hourly figure — same star, same footnotes, as everywhere."""
+    rows = cell_rows(load_workbook(bundle(f"{STEM}.xlsx"))["Turns"])
+    gap = next(r for r in rows if r[0] == "08:00" and r[1] == GE)
+    assert gap[-1] == "0*", gap
+    flat = [str(v) for r in rows for v in r if v is not None]
+    assert any(v.startswith("* excludes") for v in flat), flat[-4:]
+
+
+def a_partial_hour_is_starred_and_noted():
+    hourly = cell_rows(load_workbook(bundle(f"{STEM}.xlsx"))["Hourly"])
+    turns = cell_rows(load_workbook(bundle(f"{STEM}.xlsx"))["Turns"])
+    # Footage stops at 09:15, so the 09:00 hour holds fewer than four quarters.
+    assert next(r for r in hourly if r[0] == "09:00")[-1] == "0*", hourly[-3:]
+    assert next(r for r in turns if r[0] == "09:00" and r[1] == GE)[-1] == "0*", turns[-3:]
+    for rows in (hourly, turns):
+        note = [str(v) for r in rows for v in r if str(v).startswith("* includes hours")]
+        assert note == [report.PARTNOTE], note
+
+
+def a_fifth_arm_keeps_its_movements_in_the_total():
+    """Five arms on a four-point compass: the odd one out cannot be turn-labelled, but
+    its movements must still be in the totals, or the sheet undercounts the junction."""
+    d = payload()
+    extra = ["Kabulonga Rd", "Leopards Hill Rd", "Twin Palm Rd"]
+    d["arms"] = d["arms"] + extra
+    for b in d["bins"]:
+        for a in extra:
+            b["arms"][a] = {"classes": {}, "total": 0, "gap": False}
+    odd, cls = extra[-1], d["movements"]["od"][0]["cls"]
+    d["movements"]["od"].append({**d["movements"]["od"][0], "entry": odd, "exit": GE,
+                                 "cls": cls, "count": 3, "tier2_count": 0})
+    read = sheet(d, "fifth")
+    rows, mv = read("Turns"), read("Movements")
+    head = next(r for r in rows if r[0] == "Hour")
+    row = next(r for r in rows if r[0] == "07:00" and r[1] == odd)
+    assert row[head.index("Unplaced")] == 3, row
+    grid = next(r for r in mv if r[0] == odd)
+    assert row[-1] == 3 == sum(v for v in grid[1:] if isinstance(v, int)), (row, grid)
+    flat = [str(v) for r in rows for v in r if v is not None]
+    assert report.UNPLACED in flat, flat[-4:]
+
+
+def duplicate_compass_tags_fire_the_schematic_note():
+    d = payload()
+    d["compass"] = {a: "N" for a in d["arms"]}      # both arms claim north
+    flat = [str(v) for r in sheet(d, "dupe")("Turns") for v in r if v is not None]
+    assert report.SCHEMATIC in flat, flat[-4:]
+
+
+def a_refined_run_states_its_provenance():
+    plain = [str(v) for r in cell_rows(load_workbook(bundle(f"{STEM}.xlsx"))["Summary"])
+             for v in r if v is not None]
+    assert not any("refined by human review" in v for v in plain), plain[-2:]
+    d = payload()
+    d["qa"]["refined"] = 3
+    rows = sheet(d, "refined")("Summary")
+    line = [str(v) for r in rows for v in r if v and "refined" in str(v)]
+    assert line == [report.REFINED.format(n=3)], line
 
 
 # ---- PDF ----
@@ -375,13 +498,21 @@ seed()
 check("export writes a bundle of exactly the two deliverables", export_writes_a_bundle)
 check("manifest sha256s and sizes verify", manifest_hashes_verify)
 check("re-export restamps and swaps in one move", reexport_is_atomic_and_restamped)
-check("workbook opens with Method, Bins, Movements, Summary", excel_opens_with_the_four_sheets)
+check("workbook opens with all six sheets", excel_opens_with_the_four_sheets)
 check("a bin with no footage says so, never zero", a_gap_bin_says_no_footage)
 check("peak hour and PHF match the hand computation", phf_matches_the_hand_computation)
 check("a total spanning a gap is starred and footnoted", a_day_total_over_a_gap_is_marked)
 check("a half-day with no peak says so, never a zero grid", a_missing_peak_is_named_not_zeroed)
 check("a formula-shaped arm name is defused", a_formula_arm_name_cannot_execute_or_crash)
 check("an inferred movement is labelled in its cell", an_inferred_cell_is_labelled)
+check("15-minute bins roll up to clock hours", hourly_rolls_the_quarter_hours_up)
+check("turning movements split L/T/R for left-hand traffic", turns_sheet_splits_left_through_right)
+check("untagged arms fall back to schematic order", untagged_arms_fall_back_to_schematic_order)
+check("a gap hour's turning volumes are starred", a_gap_or_part_hour_is_starred_in_turns)
+check("a partial clock hour is starred and noted", a_partial_hour_is_starred_and_noted)
+check("a fifth arm keeps its movements in the total", a_fifth_arm_keeps_its_movements_in_the_total)
+check("duplicate compass tags fire the schematic note", duplicate_compass_tags_fire_the_schematic_note)
+check("a human-refined run states its provenance", a_refined_run_states_its_provenance)
 check("PDF renders with the diagram, matrix and footnotes", pdf_is_a_real_pdf)
 check("probe attribution appears only with a dataset", probe_page_only_when_configured)
 check("downloads are limited to manifested names", files_come_only_from_the_manifest)

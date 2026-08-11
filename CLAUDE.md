@@ -38,7 +38,7 @@ Segment filenames (`YYYYMMDD-HHMMSS.mkv`) are wallclock and load-bearing: `segme
 
 - **Unset is not zero.** A camera without a clock offset in `manifest.json` **blocks** analysis of the whole site-day (`engine.check_ready`). Offsets are seconds to ADD to reach Africa/Lusaka time.
 - **A gap is never a zero.** Missing footage renders/exports as `no footage`, not 0.
-- **Nothing edits a count.** Counts tab is read-only; QA flags are notes; the remedy for bad data is re-running analysis. Hand-edited numbers destroy the warranty argument.
+- **Nothing edits a count.** Events are immutable and no number is ever typed over: human class refinements are a separate auditable overlay (`data/refine/`) applied at read time, with the detector's original class retained; QA flags are notes; the remedy for bad data is re-running analysis. Hand-edited numbers destroy the warranty argument.
 - **Calibrations are never overwritten.** Every save is a new version; a re-aimed camera must not retro-change yesterday's counts.
 - **Analysis is idempotent.** A run deletes its own (site, date) events and crops first; re-run after crash/restart is always safe. The job queue relies on this.
 - **Crops are evidence.** Local copy deleted only after a sha256-verified R2 upload AND under disk pressure (`r2.min_free_gb`). Crops contain readable plates — internal QA material under the Zambia Data Protection Act; client export is explicit opt-in.

@@ -13,28 +13,45 @@ site_tz: Africa/Lusaka
 
 # Model label -> report class. The detector's taxonomy changes (TrafficCamNet now,
 # a fine-tuned model later); this table absorbs that without a code change.
+# The report classes are the JICA TOR scheme. The pre-TOR labels were car, minibus, bus,
+# light_truck, heavy_truck, motorcycle, bicycle — an older fine-tune emitting those needs
+# its rows re-pointed here, not a code change.
+# goods_vehicle is the review queue — refine each crop to lgv / mgv / hgv_mineral /
+# hgv_non_mineral in Counts → Refine classes.
+# Unrecognized detector labels report as 'unmapped' and surface in QA — 'other' is a
+# real, measured category (the TOR's own "Others (e.g., motorcycles)").
 classes:
-  - {model: car, report: car}
-  - {model: minibus, report: minibus}
-  - {model: bus, report: bus}
-  - {model: truck, report: light_truck}
-  - {model: heavy_truck, report: heavy_truck}
-  - {model: motorcycle, report: motorcycle}
-  - {model: bicycle, report: bicycle}
+  - {model: car, report: passenger_car}
+  - {model: minibus, report: minibus_medium_bus}
+  - {model: bus, report: large_bus}
+  - {model: truck, report: goods_vehicle}
+  - {model: heavy_truck, report: hgv_non_mineral}
+  - {model: motorcycle, report: other}
+  - {model: bicycle, report: other}
   # COCO labels, as emitted by a stock YOLO model (car/truck/motorcycle/bicycle
   # already appear above and need no second row):
-  # - {model: bus, report: bus}
+  # - {model: bus, report: large_bus}
   # - {model: person, report: pedestrian}
 
 # Passenger-car-unit factors per report class, applied only when the PCU toggle is on.
+# Every report class the deliverable can name belongs here, including the refined ones
+# no detector emits — the UI reads these keys for its refine buttons.
 pcu:
-  car: 1.0
-  minibus: 1.5
-  bus: 2.5
-  light_truck: 1.5
-  heavy_truck: 2.5
-  motorcycle: 0.5
-  bicycle: 0.5
+  passenger_car: 1.0
+  minibus_medium_bus: 1.5
+  large_bus: 2.5
+  goods_vehicle: 1.5
+  lgv: 1.5
+  mgv: 2.0
+  hgv_mineral: 3.0
+  hgv_non_mineral: 3.0
+  other: 0.5
+  unmapped: 1.0        # a label this table does not name still moves; count it as a car
+  pedestrian: 0.0
+
+# Classes a reviewer may refine a crop into. Default = the pcu keys plus every classes
+# report value; set this only to narrow or reorder the buttons.
+# refine_targets: [lgv, mgv, hgv_mineral, hgv_non_mineral]
 
 # Which detector backend runs the analysis:
 #   mock       replay fixtures — no GPU, no footage decoded

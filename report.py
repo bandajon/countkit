@@ -22,7 +22,8 @@ import aggregate
 import calib
 
 COMPASS = {"N": 0, "E": 90, "S": 180, "W": 270}
-HEAVY = ("heavy_truck", "bus")
+# Both taxonomies: the TOR classes and the pre-TOR labels an older fine-tune still emits.
+HEAVY = ("heavy_truck", "bus", "large_bus", "hgv_mineral", "hgv_non_mineral")
 METHOD = ("Counts from camera analysis (CountKit); movements paired two-tier: "
           "same-camera tracker + cross-camera class/transit-time inference — "
           "inferred share reported per cell.")
@@ -31,6 +32,11 @@ LICENCE = ("licensed floating-car data — corroboration of survey timing and pe
 SCHEMATIC = ("arms without compass tags are placed in schematic order "
              "(arm name, clockwise from north) — turns are labelled by that order")
 GAPNOTE = "* excludes {n} no-footage bins — see coverage"
+PARTNOTE = "* includes hours with partial 15-min coverage — see coverage"
+UNPLACED = ("arms beyond the four compass points cannot be turn-labelled — see Movements")
+REFINED = ("{n} vehicle classifications refined by human review of evidence crops — "
+           "detector originals retained in the raw data annex.")
+TURNS = (("left", "Left"), ("straight", "Through"), ("right", "Right"), ("uturn", "U-turn"))
 
 
 def turn_of(entry_compass, exit_compass):
@@ -45,6 +51,66 @@ def turn_of(entry_compass, exit_compass):
     if a is None or b is None:
         return None
     return {90: "left", 180: "straight", 270: "right", 0: "uturn"}[(b - a) % 360]
+
+
+def _placed(d):
+    """arm -> compass position, and whether any arm had to be placed without a tag.
+
+    Compass tags win; untagged arms fill the free slots clockwise from north. The
+    placement is what the diagram draws AND what turns are labelled by, so both read the
+    same junction — an arm labelled "(E)" whose turns were classified from a blank tag
+    would print three zero arrows beside a name that claims otherwise."""
+    tags = {a: (d.get("compass") or {}).get(a, "") for a in d["arms"]}
+    placed, free, fallback = {}, ["N", "E", "S", "W"], False
+    for a in d["arms"]:
+        if tags[a] in free:
+            placed[a] = tags[a]
+            free.remove(tags[a])
+    for a in d["arms"]:
+        if a not in placed:
+            # No slot of its own: a second arm carrying the same tag, or a fifth arm on a
+            # four-point compass. Either way the placement is no longer what was surveyed.
+            fallback = True
+            if free:
+                placed[a] = free.pop(0)
+    return placed, fallback
+
+
+def _hours(d):
+    """Bins grouped by local clock hour, in order — the TOR reports 15-minute intervals
+    aggregated on an hourly basis."""
+    out = {}
+    for b in d["bins"]:
+        out.setdefault(b["start"][11:13], []).append(b)
+    return out
+
+
+def _inf(n, inf):
+    return f"{n} ({inf} inf)" if inf else n
+
+
+def _turn_cols(unplaced):
+    return TURNS + ((("unplaced", "Unplaced"),) if unplaced else ())
+
+
+def _turn_cells(cells, placed, unplaced=False):
+    """The L/T/R/U columns plus a total, for one selection of movement cells.
+
+    A movement whose entry or exit has no compass slot cannot be given a turn, but it
+    still happened: it lands in its own bucket and in the total, so a row here never
+    reads lower than the same movements do on the Movements sheet."""
+    g = {t: [0, 0] for t, _ in _turn_cols(True)}
+    for c in cells:
+        t = turn_of(placed.get(c["entry"]), placed.get(c["exit"])) or "unplaced"
+        g[t][0] += c["count"]
+        g[t][1] += c["tier2_count"]
+    return ([_inf(*g[t]) for t, _ in _turn_cols(unplaced)]
+            + [sum(v[0] for v in g.values())])
+
+
+def _refined_note(d):
+    n = d["qa"].get("refined")
+    return REFINED.format(n=n) if isinstance(n, (int, float)) and n > 0 else None
 
 
 def _bins_in(d, period):
@@ -187,6 +253,36 @@ def _excel(path, d, config):
     if marked:
         ws.append([GAPNOTE.format(n=_total(d)[1])])
 
+    ws = wb.create_sheet("Hourly")
+    ws.append(["Hour"] + head1[1:] + ["All arms"])
+    ws.append(head2 + ["total"])
+    for c in ws[1] + ws[2]:
+        c.font = bold
+    marked = partial = False
+    for hh, bs in _hours(d).items():
+        bins = [b["ts"] for b in bs]
+        # An edge hour the survey only overlaps is a smaller hour, not a quiet one — the
+        # same star, so a short first or last row is never read as a measured hourly rate.
+        part = len(bs) < 4
+        row, rtot, rgap = [f"{hh}:00"], 0, 0
+        for a in arms:
+            n, g = _total(d, a, bins)
+            cls = {}
+            for b in bs:
+                for k, v in b["arms"][a]["classes"].items():
+                    cls[k] = cls.get(k, 0) + v
+            # Starred, not "no footage": an hour is a mix of measured and unmeasured
+            # quarters, and the sum is real as far as it goes.
+            row += [_mark(cls.get(k, 0), g or part) for k in classes] + [_mark(n, g or part)]
+            rtot, rgap = rtot + n, rgap + g
+        ws.append(row + [_mark(rtot, rgap or part)])
+        marked |= bool(rgap)
+        partial |= part
+    if marked:
+        ws.append([GAPNOTE.format(n=_total(d)[1])])
+    if partial:
+        ws.append([PARTNOTE])
+
     ws = wb.create_sheet("Movements")
     for label, period in (("AM peak", "am"), ("PM peak", "pm"), ("Full day", "day")):
         if period != "day" and not d["peaks"].get(period):
@@ -208,10 +304,60 @@ def _excel(path, d, config):
         for en in arms:
             row = [_cell(en)]
             for ex in arms:
-                n, inf = grid.get((en, ex), (0, 0))
-                row.append(f"{n} ({inf} inf)" if inf else n)
+                row.append(_inf(*grid.get((en, ex), (0, 0))))
             ws.append(row)
         ws.append([])
+
+    ws = wb.create_sheet("Turns")
+    placed, schematic = _placed(d)
+    od = d["movements"]["od"]
+    # One movement with an unlabellable end is enough to show the column everywhere:
+    # a bucket that appears halfway down the sheet reads as a new kind of number.
+    unplaced = any(c["entry"] not in placed or c["exit"] not in placed for c in od)
+    head = [lbl for _, lbl in _turn_cols(unplaced)] + ["total"]
+    ws.append([_cell("Hourly turning volumes — all classes")])
+    ws.cell(ws.max_row, 1).font = bold
+    ws.append(["Hour", "Entry"] + head)
+    for c in ws[ws.max_row]:
+        c.font = bold
+    marked = partial = False
+    for hh, bs in _hours(d).items():
+        tss = {b["ts"] for b in bs}
+        part = len(bs) < 4
+        for a in arms:
+            g = any(b["arms"][a]["gap"] for b in bs if a in b["arms"])
+            sel = [c for c in od if c["entry"] == a and c["bin"] in tss]
+            row = _turn_cells(sel, placed, unplaced)
+            row[-1] = _mark(row[-1], g or part)
+            ws.append([f"{hh}:00", _cell(a)] + row)
+            marked |= g
+        partial |= part
+    ws.append([])
+    for label, period in (("AM peak", "am"), ("PM peak", "pm"), ("Full day", "day")):
+        if period != "day" and not d["peaks"].get(period):
+            ws.append([_cell(f"no {period.upper()} peak recorded")])
+            ws.cell(ws.max_row, 1).font = bold
+            ws.append([])
+            continue
+        cells = _cells(d, period)
+        ws.append([_cell(f"{label} — turning volumes by class")])
+        ws.cell(ws.max_row, 1).font = bold
+        ws.append(["Entry", "Class"] + head)
+        for c in ws[ws.max_row]:
+            c.font = bold
+        for a in arms:
+            for cl in classes:
+                sel = [c for c in cells if c["entry"] == a and c["cls"] == cl]
+                ws.append([_cell(a), _cell(cl)] + _turn_cells(sel, placed, unplaced))
+        ws.append([])
+    if schematic:
+        ws.append([_cell(SCHEMATIC)])
+    if any(a not in placed for a in arms):
+        ws.append([_cell(UNPLACED)])
+    if marked:
+        ws.append([GAPNOTE.format(n=_total(d)[1])])
+    if partial:
+        ws.append([PARTNOTE])
 
     ws = wb.create_sheet("Summary")
     ws.append(["Metric", "Value"])
@@ -238,6 +384,10 @@ def _excel(path, d, config):
         ws.append([f"AM PHF {_cell(a)}", _phf(d, a, _bins_in(d, "am")) or ""])
     if marked:
         ws.append([GAPNOTE.format(n=_total(d)[1])])
+    # Wherever the method is stated, the manual split is stated with it: a refined class
+    # is a human overruling the detector, and the client bought the audit trail too.
+    if _refined_note(d):
+        ws.append([_cell(_refined_note(d))])
     wb.save(path)
 
 
@@ -268,18 +418,7 @@ def _diagram(c, d, x0, y0, size):
     c.line(x0 + 4, y0 + size - 8, x0 + 1.5, y0 + size - 12)
     c.line(x0 + 4, y0 + size - 8, x0 + 6.5, y0 + size - 12)
 
-    arms = d["arms"]
-    tags = {a: (d.get("compass") or {}).get(a, "") for a in arms}
-    placed, free = {}, [t for t in ("N", "E", "S", "W")]
-    for a in arms:                       # compass tags win; the rest fill in clockwise
-        t = tags.get(a)
-        if t in free:
-            placed[a] = t
-            free.remove(t)
-    for a in arms:
-        if a not in placed and free:
-            placed[a] = free.pop(0)
-
+    placed = _placed(d)[0]
     dirs = {"N": (0, 1), "E": (1, 0), "S": (0, -1), "W": (-1, 0)}
     # Hooks stop at the far kerb rather than sailing past it, which is what made the
     # three approaches read as one tangle.
@@ -301,7 +440,7 @@ def _diagram(c, d, x0, y0, size):
         for cell in cells:
             if cell["entry"] != arm:
                 continue
-            t = turn_of(tags.get(arm), tags.get(cell["exit"]))
+            t = turn_of(tag, placed.get(cell["exit"]))
             if t in turns:                       # U-turns carry no arrow
                 turns[t][0] += cell["count"]
                 turns[t][1] += cell["count"] if cell["cls"] in HEAVY else 0
@@ -423,7 +562,7 @@ def _pdf(path, d, config):
 
     fy = 24 * mm
     c.setFont("Helvetica", 6.5)
-    notes = [METHOD]
+    notes = [METHOD] + ([_refined_note(d)] if _refined_note(d) else [])
     if day_g:
         notes.append(GAPNOTE.format(n=day_g))
     if not all((d.get("compass") or {}).get(a) for a in arms):
