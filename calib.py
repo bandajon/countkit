@@ -12,6 +12,7 @@ DATA_ROOT = Path("./data")   # app.py repoints this at data_root(); moving it ne
 # site/cam names become path segments; \Z not $, or "site1\n" validates and gets its
 # own identical-looking tree.
 NAME = re.compile(r"\A[A-Za-z0-9_-]{1,64}\Z")
+DATE = re.compile(r"\A\d{4}-\d{2}-\d{2}\Z")
 KINDS = ("entry", "exit")
 COMPASS = ("N", "S", "E", "W", "")
 
@@ -19,6 +20,15 @@ COMPASS = ("N", "S", "E", "W", "")
 def _check(label, v):
     if not isinstance(v, str) or not NAME.match(v):
         raise ValueError(f"bad {label} name {v!r}: letters, digits, _ and - only")
+
+
+def check_site_date(site, date):
+    """A site-day names a path segment in five trees (events DB, crops, ingest,
+    manifest, sidecars). Checked here, where the name rules already live, so a caller
+    is covered by routing through the code that uses the name — not by remembering."""
+    _check("site", site)
+    if not (isinstance(date, str) and DATE.match(date)):
+        raise ValueError(f"bad date {date!r}: expected YYYY-MM-DD")
 
 
 def _site_dir(site):

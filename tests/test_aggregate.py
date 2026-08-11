@@ -220,7 +220,9 @@ def unknown_class_and_pcu():
     # or re-pointing the taxonomy (TrafficCamNet -> a TOR fine-tune) reds this test.
     cmap = aggregate.class_map(app.CONFIG)
     cls = [b for b in r["bins"] if b["total"]][0]["arms"][GE]["classes"]
-    assert cls == {cmap["car"]: 1, cmap["bus"]: 1, "other": 1}, cls
+    # 'unmapped', not 'other': this taxonomy maps real two-wheelers to 'other', and an
+    # oxcart nobody detected must not land in a column the deliverable claims to measure.
+    assert cls == {cmap["car"]: 1, cmap["bus"]: 1, "unmapped": 1}, cls
     assert r["qa"]["unmapped"] == {"oxcart": 1}, r["qa"]["unmapped"]
     # 2 cars at the default 1.0 + 1 bus at 2.5: a class with no factor is one car's worth.
     assert aggregate.apply_pcu({"car": 2, "bus": 1}, {"bus": 2.5}) == 4.5
@@ -430,7 +432,51 @@ def later_row_wins_and_a_stale_row_is_not_coverage():
     r = run()
     assert r["classes"] == ["hgv_non_mineral"], r["classes"]
     assert r["qa"]["refined"] == 1, "a stale row must not claim review coverage"
+    assert r["qa"]["refined_stale"] == 1, "and the lost review must be visible"
     assert aggregate.read_refinements(app.data_root(), SITE, DATE)["count"] == 3
+
+
+def a_refinement_survives_a_corrected_clock():
+    """corrected_ts = segment + t + offset, so fixing a camera's offset and re-running
+    moves every stamp. A day of paid review must not evaporate on an operator's fix."""
+    write([("cam1", 1, "truck", GE, "entry", ts("14:00")),
+           ("cam1", 1, "truck", CH, "exit", ts("14:00", 20))])
+    refine([{"cam": "cam1", "obj_id": 1, "line": GE, "kind": "entry",
+             "ts": ts("14:00"), "to": "hgv_mineral"}])
+    assert run()["qa"]["refined"] == 1
+    write([("cam1", 1, "truck", GE, "entry", ts("14:00", 3)),      # the +3 s re-run
+           ("cam1", 1, "truck", CH, "exit", ts("14:00", 23))])
+    r = run()
+    assert r["qa"]["refined"] == 1 and r["qa"]["refined_stale"] == 0, r["qa"]["refined"]
+    assert [b for b in r["bins"] if b["total"]][0]["arms"][GE]["classes"] \
+        == {"hgv_mineral": 1}, r["bins"]
+
+
+def an_ambiguous_match_is_left_alone():
+    # Same tracker id crossing the same gate twice, 50 s apart, and a refinement whose
+    # stamp fits neither: guessing would put the human's call on the wrong vehicle.
+    write([("cam1", 5, "truck", GE, "entry", ts("15:00")),
+           ("cam1", 5, "truck", GE, "entry", ts("15:00", 50))])
+    refine([{"cam": "cam1", "obj_id": 5, "line": GE, "kind": "entry",
+             "ts": ts("15:00", 20), "to": "hgv_mineral"}])
+    r = run()
+    assert r["qa"]["refined"] == 0, "an ambiguous row must not be applied"
+    assert r["qa"]["refined_stale"] == 1, r["qa"]
+
+
+def refined_counts_vehicles_not_crossings():
+    # The UI saves the entry and its paired exit together; counting both would tell the
+    # client twice as many vehicles were reviewed as were.
+    write([("cam1", 1, "truck", GE, "entry", ts("16:00")),
+           ("cam2", 70, "truck", CH, "exit", ts("16:00", 30))])
+    refine([{"cam": "cam1", "obj_id": 1, "line": GE, "kind": "entry",
+             "ts": ts("16:00"), "to": "hgv_mineral"},
+            {"cam": "cam2", "obj_id": 70, "line": CH, "kind": "exit",
+             "ts": ts("16:00", 30), "to": "hgv_mineral"}])
+    r = run()
+    assert r["movements"]["tier2"] == 1, "both ends refined, so the pair still holds"
+    assert r["qa"]["refined"] == 1, "one vehicle, two crossings"
+    assert r["qa"]["refined_stale"] == 0, r["qa"]
 
 
 def a_refined_tier2_pair_needs_both_ends():
@@ -460,6 +506,9 @@ def refine_targets_are_config_then_the_classes_table():
     d = aggregate.refine_targets(app.CONFIG)
     assert set(app.CONFIG["pcu"]) <= set(d), d
     assert set(aggregate.class_map(app.CONFIG).values()) <= set(d), d
+    # And the payload carries them: the buttons cannot honour an override they never see.
+    assert run({**app.CONFIG, "refine_targets": ["lgv"]})["refine_targets"] == ["lgv"]
+    assert run()["refine_targets"] == d
 
 
 def api_refines_a_pair_and_lists_events():
@@ -526,6 +575,10 @@ check("the later refinement wins; a stale one is not coverage",
       later_row_wins_and_a_stale_row_is_not_coverage)
 check("refining both ends keeps a tier-2 pair; one end breaks it",
       a_refined_tier2_pair_needs_both_ends)
+check("a refinement survives a corrected clock offset",
+      a_refinement_survives_a_corrected_clock)
+check("an ambiguous tolerant match is left unapplied", an_ambiguous_match_is_left_alone)
+check("qa.refined counts vehicles, not crossings", refined_counts_vehicles_not_crossings)
 check("refine targets: config list, else the classes table",
       refine_targets_are_config_then_the_classes_table)
 check("refine API rejects an unknown target and pages the review list",
@@ -546,15 +599,36 @@ def hostile_names_never_reach_the_filesystem():
     ):
         r = req()
         assert r.status_code == 400, (r.status_code, r.text)
-    # Path params cannot carry a slash (the router 404s them), but a dot-only name
-    # can — the name check must catch what routing lets through.
-    r = C.get("/api/analyze/status/../2026-08-06")
-    assert r.status_code in (400, 404), (r.status_code, r.text)
     assert not marker.exists(), "a hostile site name wrote outside data_root"
+    # httpx resolves '/../' in the client, so a dot-segment URL never reaches the check.
+    # Call it directly instead of asserting on a request that cannot arrive.
+    for site, date in ((("..", "2026-08-06")), ("gerlache", "2026-8-6"),
+                       ("gerlache", "../evil"), ("gerlache", None)):
+        try:
+            aggregate.check_names(site, date)
+            raise AssertionError(f"{site!r} {date!r} passed the name check")
+        except ValueError:
+            pass
+
+
+def a_hostile_body_never_reaches_the_filesystem():
+    """The JSON-body routes are the ones with no router in front of them: queue lands in
+    engine.analyze (which rmtree's crops/<site>/<date>), offsets writes a manifest."""
+    escape = "../" * 8 + "2026-08-06"
+    r = C.post("/api/analyze/queue", json={"site": SITE, "date": escape})
+    assert r.status_code == 400, (r.status_code, r.text)
+    assert "expected YYYY-MM-DD" in r.json()["detail"], r.json()
+    r = C.post("/api/offsets", json={"site": SITE, "date": escape, "cam": "cam1",
+                                     "offset_s": 0})
+    assert r.status_code == 400, (r.status_code, r.text)
+    stray = (TMP / "ingest").parent / "2026-08-06"
+    assert not stray.exists(), "a hostile date wrote a manifest outside ingest_root"
 
 
 check("hostile site/date names never reach the filesystem",
       hostile_names_never_reach_the_filesystem)
+check("a hostile body date is refused by queue and offsets",
+      a_hostile_body_never_reaches_the_filesystem)
 
 print(f"\n{'FAILED: ' + ', '.join(FAILS) if FAILS else 'all passed'}")
 sys.exit(1 if FAILS else 0)

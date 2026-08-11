@@ -6,7 +6,6 @@ remedy for bad data, because a hand-edited number destroys the warranty argument
 
 import csv
 import json
-import re
 import statistics
 import subprocess
 from datetime import datetime, timedelta, timezone
@@ -19,6 +18,7 @@ CAT = timezone(timedelta(hours=2))     # Africa/Lusaka, fixed, no DST
 BIN_S = 900                            # 15 minutes
 PAIR_WINDOW = 120.0                    # max transit time entry -> exit
 SEG_S = 600                            # FieldKit segment length
+REFINE_SLACK = 120.0                   # how far a corrected clock offset may move a stamp
 OK_RATE = 85.0                         # combined pairing below this flags the site
 MAX_INFERRED = 30.0                    # inferred share of paired above this warns
 
@@ -43,9 +43,13 @@ def class_map(config):
 
 
 def report_class(label, cmap):
-    """An unmapped detector label is reported as 'other' and counted in QA — silently
-    dropping it would shrink the totals with no trace."""
-    return cmap.get(label, "other")
+    """An unmapped detector label is reported as 'unmapped' and counted in QA — silently
+    dropping it would shrink the totals with no trace.
+
+    Its own bucket, not 'other': a taxonomy that maps real classes to 'other' (JICA does,
+    for two-wheelers) would otherwise merge measured vehicles with unrecognised junk and
+    price the junk at other's PCU factor."""
+    return cmap.get(label, "unmapped")
 
 
 def load_events(data_root, site, date):
@@ -58,11 +62,7 @@ def load_events(data_root, site, date):
     # Stripped on load: arm_map strips calibration names but the events table stores them
     # verbatim, so "North " and "North" would fork one arm into two columns.
     evs = [dict(zip(cols, r), line=(r[3] or "").strip()) for r in rows]
-    idx = _refine_index(data_root, site, date)
-    for e in evs:
-        to = idx.get((e["cam"], e["obj_id"], e["line"], e["kind"], round(e["ts"], 3)))
-        if to:
-            e["refined"] = to      # the detector's own cls stays put; this is an overlay
+    _apply_refinements(evs, _refine_index(data_root, site, date))
     return evs
 
 
@@ -402,6 +402,7 @@ def counts(site, date, data_root, ingest_root, config):
         "arms": arms,
         "classes": sorted({e["rc"] for e in evs}),
         "pcu_factors": config.get("pcu") or {},
+        "refine_targets": refine_targets(config),   # the UI cannot derive an override
         "movements": {"od": sorted(od.values(), key=lambda c: (c["bin"], c["entry"])),
                       "tier1": sum(1 for m in moves if m["tier"] == 1),
                       "tier2": sum(1 for m in moves if m["tier"] == 2),
@@ -414,9 +415,14 @@ def counts(site, date, data_root, ingest_root, config):
                # None. Keying on the offsets themselves can never report one missing.
                "offsets": {cam: offs.get(cam) for cam in cams},
                "uncalibrated": uncalibrated,
-               # Refinements that MATCHED an event: a row left behind by a re-analysis
-               # must not claim review coverage the day no longer has.
-               "refined": sum(1 for e in evs if e.get("refined")),
+               # Vehicles, not crossings: the UI refines an entry and its paired exit
+               # together, so counting both would report twice the review that happened.
+               "refined": sum(1 for e in evs
+                              if e["kind"] == "entry" and e.get("refined")),
+               # And the review that evaporated — refinements matching no event at all,
+               # which is paid human work gone. Silence here is the failure mode.
+               "refined_stale": max(0, len(_refine_index(data_root, site, date))
+                                    - sum(1 for e in evs if e.get("refined"))),
                "unpaired_per_cam": _leftover_qa(leftovers),
                "probe": probe_out},
     }
@@ -451,16 +457,7 @@ def movements_detail(site, date, data_root, config, entry=None, exit=None,
                           for m in out[:limit]]}
 
 
-DATE_NAME = re.compile(r"\A\d{4}-\d{2}-\d{2}\Z")
-
-
-def check_names(site, date):
-    """site and date come off raw route parameters and become filenames (event DB,
-    flags, refinements, the segment-duration cache) — validated once, here, before
-    anything touches the filesystem."""
-    calib._check("site", site)
-    if not DATE_NAME.match(date or ""):
-        raise ValueError(f"bad date {date!r}: expected YYYY-MM-DD")
+check_names = calib.check_site_date     # the name app.py and the tests already call
 
 
 def _sidecar(data_root, kind, site, date):
@@ -532,6 +529,31 @@ def _refine_index(data_root, site, date):
     return idx
 
 
+def _apply_refinements(evs, idx):
+    """Exact timestamp first, then the leftovers within REFINE_SLACK of the same
+    crossing — but only where exactly one event is in reach.
+
+    corrected_ts moves whenever an operator fixes a camera's clock offset and re-runs,
+    and a refinement is paid human review: keying on the exact stamp alone would void a
+    day's work silently. An ambiguous match is worse than none, so uniqueness decides."""
+    free = {}
+    for e in evs:
+        free.setdefault((e["cam"], e["obj_id"], e["line"], e["kind"]), []).append(e)
+    left = []
+    for (cam, oid, line, kind, ts), to in idx.items():
+        near = free.get((cam, oid, line, kind), [])
+        e = next((x for x in near if round(x["ts"], 3) == ts), None)
+        if e is None:
+            left.append(((cam, oid, line, kind, ts), to))
+        else:
+            e["refined"] = to     # the detector's own cls stays put; this is an overlay
+    for (cam, oid, line, kind, ts), to in left:
+        near = [x for x in free.get((cam, oid, line, kind), [])
+                if abs(x["ts"] - ts) <= REFINE_SLACK and not x.get("refined")]
+        if len(near) == 1:
+            near[0]["refined"] = to
+
+
 def refine_targets(config):
     """The classes a human may assign. Config first: the TOR asks for splits (mineral
     vs non-mineral HGV) that no detector taxonomy contains, so the target list cannot be
@@ -571,6 +593,7 @@ def apply_pcu(classes, factors):
 def set_offset(ingest_root, date, site, cam, offset_s):
     """Writes into the footage manifest so the correction travels with the footage.
     None REMOVES the key — back to unset, which is not the same as zero."""
+    check_names(site, date)      # both become path segments, and this writes a file
     p = Path(ingest_root) / date / site / "manifest.json"
     try:
         doc = json.loads(p.read_text())

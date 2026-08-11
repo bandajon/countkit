@@ -66,6 +66,9 @@ def site_day_cams(ingest_root, date, site):
 def check_ready(ingest_root, date, site):
     """Raises ValueError with the copy the UI shows verbatim. Analysis of unverified
     footage, or footage whose clock is unknown, is worse than no analysis at all."""
+    # First, before any path is built: analyze() gates on this call, so a hostile date
+    # from a route body or a tampered jobs.json is refused before the crop rmtree.
+    calib.check_site_date(site, date)
     d = Path(ingest_root) / date / site
     if not (d / ".verified").exists():
         raise ValueError(f"{site} {date}: not verified — pull it with FieldKit first")
