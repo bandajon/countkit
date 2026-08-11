@@ -335,6 +335,57 @@ def untagged_arms_fall_back_to_schematic_order():
     assert hour[head.index("Left")] == 0, hour
 
 
+def a_gap_or_part_hour_is_starred_in_turns():
+    """A turning volume over the 08:00-09:00 hole, or over an edge hour the survey only
+    clips, is not a measured hourly figure — same star, same footnotes, as everywhere."""
+    rows = cell_rows(load_workbook(bundle(f"{STEM}.xlsx"))["Turns"])
+    gap = next(r for r in rows if r[0] == "08:00" and r[1] == GE)
+    assert gap[-1] == "0*", gap
+    flat = [str(v) for r in rows for v in r if v is not None]
+    assert any(v.startswith("* excludes") for v in flat), flat[-4:]
+
+
+def a_partial_hour_is_starred_and_noted():
+    hourly = cell_rows(load_workbook(bundle(f"{STEM}.xlsx"))["Hourly"])
+    turns = cell_rows(load_workbook(bundle(f"{STEM}.xlsx"))["Turns"])
+    # Footage stops at 09:15, so the 09:00 hour holds fewer than four quarters.
+    assert next(r for r in hourly if r[0] == "09:00")[-1] == "0*", hourly[-3:]
+    assert next(r for r in turns if r[0] == "09:00" and r[1] == GE)[-1] == "0*", turns[-3:]
+    for rows in (hourly, turns):
+        note = [str(v) for r in rows for v in r if str(v).startswith("* includes hours")]
+        assert note == [report.PARTNOTE], note
+
+
+def a_fifth_arm_keeps_its_movements_in_the_total():
+    """Five arms on a four-point compass: the odd one out cannot be turn-labelled, but
+    its movements must still be in the totals, or the sheet undercounts the junction."""
+    d = payload()
+    extra = ["Kabulonga Rd", "Leopards Hill Rd", "Twin Palm Rd"]
+    d["arms"] = d["arms"] + extra
+    for b in d["bins"]:
+        for a in extra:
+            b["arms"][a] = {"classes": {}, "total": 0, "gap": False}
+    odd, cls = extra[-1], d["movements"]["od"][0]["cls"]
+    d["movements"]["od"].append({**d["movements"]["od"][0], "entry": odd, "exit": GE,
+                                 "cls": cls, "count": 3, "tier2_count": 0})
+    read = sheet(d, "fifth")
+    rows, mv = read("Turns"), read("Movements")
+    head = next(r for r in rows if r[0] == "Hour")
+    row = next(r for r in rows if r[0] == "07:00" and r[1] == odd)
+    assert row[head.index("Unplaced")] == 3, row
+    grid = next(r for r in mv if r[0] == odd)
+    assert row[-1] == 3 == sum(v for v in grid[1:] if isinstance(v, int)), (row, grid)
+    flat = [str(v) for r in rows for v in r if v is not None]
+    assert report.UNPLACED in flat, flat[-4:]
+
+
+def duplicate_compass_tags_fire_the_schematic_note():
+    d = payload()
+    d["compass"] = {a: "N" for a in d["arms"]}      # both arms claim north
+    flat = [str(v) for r in sheet(d, "dupe")("Turns") for v in r if v is not None]
+    assert report.SCHEMATIC in flat, flat[-4:]
+
+
 def a_refined_run_states_its_provenance():
     plain = [str(v) for r in cell_rows(load_workbook(bundle(f"{STEM}.xlsx"))["Summary"])
              for v in r if v is not None]
@@ -457,6 +508,10 @@ check("an inferred movement is labelled in its cell", an_inferred_cell_is_labell
 check("15-minute bins roll up to clock hours", hourly_rolls_the_quarter_hours_up)
 check("turning movements split L/T/R for left-hand traffic", turns_sheet_splits_left_through_right)
 check("untagged arms fall back to schematic order", untagged_arms_fall_back_to_schematic_order)
+check("a gap hour's turning volumes are starred", a_gap_or_part_hour_is_starred_in_turns)
+check("a partial clock hour is starred and noted", a_partial_hour_is_starred_and_noted)
+check("a fifth arm keeps its movements in the total", a_fifth_arm_keeps_its_movements_in_the_total)
+check("duplicate compass tags fire the schematic note", duplicate_compass_tags_fire_the_schematic_note)
 check("a human-refined run states its provenance", a_refined_run_states_its_provenance)
 check("PDF renders with the diagram, matrix and footnotes", pdf_is_a_real_pdf)
 check("probe attribution appears only with a dataset", probe_page_only_when_configured)

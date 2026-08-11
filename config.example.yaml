@@ -18,6 +18,8 @@ site_tz: Africa/Lusaka
 # its rows re-pointed here, not a code change.
 # goods_vehicle is the review queue — refine each crop to lgv / mgv / hgv_mineral /
 # hgv_non_mineral in Counts → Refine classes.
+# Unrecognized detector labels report as 'unmapped' and surface in QA — 'other' is a
+# real, measured category (the TOR's own "Others (e.g., motorcycles)").
 classes:
   - {model: car, report: passenger_car}
   - {model: minibus, report: minibus_medium_bus}
@@ -44,6 +46,7 @@ pcu:
   hgv_mineral: 3.0
   hgv_non_mineral: 3.0
   other: 0.5
+  unmapped: 1.0        # a label this table does not name still moves; count it as a car
   pedestrian: 0.0
 
 # Classes a reviewer may refine a crop into. Default = the pcu keys plus every classes

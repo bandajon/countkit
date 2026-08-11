@@ -32,6 +32,8 @@ LICENCE = ("licensed floating-car data — corroboration of survey timing and pe
 SCHEMATIC = ("arms without compass tags are placed in schematic order "
              "(arm name, clockwise from north) — turns are labelled by that order")
 GAPNOTE = "* excludes {n} no-footage bins — see coverage"
+PARTNOTE = "* includes hours with partial 15-min coverage — see coverage"
+UNPLACED = ("arms beyond the four compass points cannot be turn-labelled — see Movements")
 REFINED = ("{n} vehicle classifications refined by human review of evidence crops — "
            "detector originals retained in the raw data annex.")
 TURNS = (("left", "Left"), ("straight", "Through"), ("right", "Right"), ("uturn", "U-turn"))
@@ -65,9 +67,12 @@ def _placed(d):
             placed[a] = tags[a]
             free.remove(tags[a])
     for a in d["arms"]:
-        if a not in placed and free:
-            placed[a] = free.pop(0)
+        if a not in placed:
+            # No slot of its own: a second arm carrying the same tag, or a fifth arm on a
+            # four-point compass. Either way the placement is no longer what was surveyed.
             fallback = True
+            if free:
+                placed[a] = free.pop(0)
     return placed, fallback
 
 
@@ -84,15 +89,23 @@ def _inf(n, inf):
     return f"{n} ({inf} inf)" if inf else n
 
 
-def _turn_cells(cells, placed):
-    """The L/T/R/U columns plus a total, for one selection of movement cells."""
-    g = {t: [0, 0] for t, _ in TURNS}
+def _turn_cols(unplaced):
+    return TURNS + ((("unplaced", "Unplaced"),) if unplaced else ())
+
+
+def _turn_cells(cells, placed, unplaced=False):
+    """The L/T/R/U columns plus a total, for one selection of movement cells.
+
+    A movement whose entry or exit has no compass slot cannot be given a turn, but it
+    still happened: it lands in its own bucket and in the total, so a row here never
+    reads lower than the same movements do on the Movements sheet."""
+    g = {t: [0, 0] for t, _ in _turn_cols(True)}
     for c in cells:
-        t = turn_of(placed.get(c["entry"]), placed.get(c["exit"]))
-        if t:                      # an arm with no place on the junction gets no turn
-            g[t][0] += c["count"]
-            g[t][1] += c["tier2_count"]
-    return [_inf(*g[t]) for t, _ in TURNS] + [sum(g[t][0] for t, _ in TURNS)]
+        t = turn_of(placed.get(c["entry"]), placed.get(c["exit"])) or "unplaced"
+        g[t][0] += c["count"]
+        g[t][1] += c["tier2_count"]
+    return ([_inf(*g[t]) for t, _ in _turn_cols(unplaced)]
+            + [sum(v[0] for v in g.values())])
 
 
 def _refined_note(d):
@@ -245,9 +258,12 @@ def _excel(path, d, config):
     ws.append(head2 + ["total"])
     for c in ws[1] + ws[2]:
         c.font = bold
-    marked = False
+    marked = partial = False
     for hh, bs in _hours(d).items():
         bins = [b["ts"] for b in bs]
+        # An edge hour the survey only overlaps is a smaller hour, not a quiet one — the
+        # same star, so a short first or last row is never read as a measured hourly rate.
+        part = len(bs) < 4
         row, rtot, rgap = [f"{hh}:00"], 0, 0
         for a in arms:
             n, g = _total(d, a, bins)
@@ -257,12 +273,15 @@ def _excel(path, d, config):
                     cls[k] = cls.get(k, 0) + v
             # Starred, not "no footage": an hour is a mix of measured and unmeasured
             # quarters, and the sum is real as far as it goes.
-            row += [_mark(cls.get(k, 0), g) for k in classes] + [_mark(n, g)]
+            row += [_mark(cls.get(k, 0), g or part) for k in classes] + [_mark(n, g or part)]
             rtot, rgap = rtot + n, rgap + g
-        ws.append(row + [_mark(rtot, rgap)])
+        ws.append(row + [_mark(rtot, rgap or part)])
         marked |= bool(rgap)
+        partial |= part
     if marked:
         ws.append([GAPNOTE.format(n=_total(d)[1])])
+    if partial:
+        ws.append([PARTNOTE])
 
     ws = wb.create_sheet("Movements")
     for label, period in (("AM peak", "am"), ("PM peak", "pm"), ("Full day", "day")):
@@ -292,17 +311,27 @@ def _excel(path, d, config):
     ws = wb.create_sheet("Turns")
     placed, schematic = _placed(d)
     od = d["movements"]["od"]
-    head = [lbl for _, lbl in TURNS] + ["total"]
+    # One movement with an unlabellable end is enough to show the column everywhere:
+    # a bucket that appears halfway down the sheet reads as a new kind of number.
+    unplaced = any(c["entry"] not in placed or c["exit"] not in placed for c in od)
+    head = [lbl for _, lbl in _turn_cols(unplaced)] + ["total"]
     ws.append([_cell("Hourly turning volumes — all classes")])
     ws.cell(ws.max_row, 1).font = bold
     ws.append(["Hour", "Entry"] + head)
     for c in ws[ws.max_row]:
         c.font = bold
+    marked = partial = False
     for hh, bs in _hours(d).items():
         tss = {b["ts"] for b in bs}
+        part = len(bs) < 4
         for a in arms:
+            g = any(b["arms"][a]["gap"] for b in bs if a in b["arms"])
             sel = [c for c in od if c["entry"] == a and c["bin"] in tss]
-            ws.append([f"{hh}:00", _cell(a)] + _turn_cells(sel, placed))
+            row = _turn_cells(sel, placed, unplaced)
+            row[-1] = _mark(row[-1], g or part)
+            ws.append([f"{hh}:00", _cell(a)] + row)
+            marked |= g
+        partial |= part
     ws.append([])
     for label, period in (("AM peak", "am"), ("PM peak", "pm"), ("Full day", "day")):
         if period != "day" and not d["peaks"].get(period):
@@ -319,10 +348,16 @@ def _excel(path, d, config):
         for a in arms:
             for cl in classes:
                 sel = [c for c in cells if c["entry"] == a and c["cls"] == cl]
-                ws.append([_cell(a), _cell(cl)] + _turn_cells(sel, placed))
+                ws.append([_cell(a), _cell(cl)] + _turn_cells(sel, placed, unplaced))
         ws.append([])
     if schematic:
         ws.append([_cell(SCHEMATIC)])
+    if any(a not in placed for a in arms):
+        ws.append([_cell(UNPLACED)])
+    if marked:
+        ws.append([GAPNOTE.format(n=_total(d)[1])])
+    if partial:
+        ws.append([PARTNOTE])
 
     ws = wb.create_sheet("Summary")
     ws.append(["Metric", "Value"])
