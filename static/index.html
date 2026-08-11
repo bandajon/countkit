@@ -901,6 +901,15 @@ labInit();   // the ResizeObserver above already covers window resizes
 const post = (url, body) => fetch(url, {method: 'POST',
   headers: {'content-type': 'application/json'}, body: JSON.stringify(body)});
 
+// The status route refuses a site name outside [A-Za-z0-9_-] and the ingest tree happily
+// holds one ("Great East Rd"). Parsed blind, that 400 body reads as a status object: the
+// row would offer Queue on a day the server will refuse, and the Counts/Report dropdowns
+// would drop it without a word. A refusal is a blocked day, which is what it is.
+async function analyzeStatus(site, date) {
+  const r = await fetch(`/api/analyze/status/${site}/${date}`);
+  return r.ok ? r.json() : {blocked: await detail(r), events: 0};
+}
+
 async function days() {
   const rows = await (await fetch('/api/ingest')).json();
   const box = $('daylist');
@@ -909,7 +918,7 @@ async function days() {
   }
   box.innerHTML = '';
   for (const r of rows) {
-    const st = await (await fetch(`/api/analyze/status/${r.site}/${r.date}`)).json();
+    const st = await analyzeStatus(r.site, r.date);
     const d = document.createElement('div');
     d.className = 'armrow';
     const dot = st.blocked ? 's-bad' : st.events ? 's-ok' : 's-ok';
@@ -1048,7 +1057,7 @@ async function countsInit() {
   const rows = await ri.json();
   const opts = [];
   for (const r of rows) {
-    const st = await (await fetch(`/api/analyze/status/${r.site}/${r.date}`)).json();
+    const st = await analyzeStatus(r.site, r.date);
     if (st.events) opts.push(`<option value="${r.site}|${r.date}">${r.date} · ${r.site}`
                              + ` · ${st.events} events</option>`);
   }
@@ -1203,11 +1212,11 @@ function refineRows(staged) {
   return rows;
 }
 
-// The targets are not in the counts payload: config's pcu table names every report class,
-// so its keys plus the classes present are the list. The server validates authoritatively
-// and its 400 names the allowed list, so a stale button here is a message, not a bad write.
-const refineTargets = () =>
-  [...new Set([...Object.keys(CNT.data.pcu_factors || {}), ...CNT.data.classes])];
+// The payload's refine_targets is the same list the server validates against, so config's
+// refine_targets override governs the buttons. The pcu-keys derivation is only the
+// fallback for a page loaded against a server that predates the field.
+const refineTargets = () => CNT.data.refine_targets
+  || [...new Set([...Object.keys(CNT.data.pcu_factors || {}), ...CNT.data.classes])];
 
 function refineSync() {
   const n = CNT.data.qa.refined || 0;
@@ -1281,7 +1290,8 @@ $('rf-save').onclick = async () => {
   if (!rows.length) return;
   const r = await post('/api/refine', {site: CNT.site, date: CNT.date, rows});
   if (!r.ok) { refineRes('bad', await detail(r)); return; }
-  refineRes('good', `${(await r.json()).count} crossings re-classed`);
+  // r.count is the cumulative ledger; this batch is what the reviewer just did.
+  refineRes('good', `${rows.length} crossings re-classed`);
   await loadCounts();                  // refineSync clears the staging and redraws the grid
 };
 
@@ -1553,7 +1563,7 @@ async function reportInit() {
   const rows = await (await fetch('/api/ingest')).json();
   const opts = [];
   for (const r of rows) {
-    const st = await (await fetch(`/api/analyze/status/${r.site}/${r.date}`)).json();
+    const st = await analyzeStatus(r.site, r.date);
     opts.push(`<option value="${r.site}|${r.date}" data-ev="${st.events}">`
       + `${r.date} · ${r.site}${st.events ? '' : ' · not analyzed'}</option>`);
   }

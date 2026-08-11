@@ -264,6 +264,49 @@ console.log(JSON.stringify([refineRows(stage({json.dumps(entry)})),
     assert len(unpaired) == 1 and unpaired[0]["obj_id"] == 1, unpaired
 
 
+def a_refused_status_blocks_the_day_never_loses_it():
+    """/api/ingest lists any directory; /api/analyze/status refuses a site name outside
+    [A-Za-z0-9_-]. Parsed blind that 400 body reads as a status object — Analyze would
+    offer Queue and Counts/Report would drop the day silently."""
+    d = TMP / "ingest" / DATE / "Great East Rd" / "cam1"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "20260804-080000.mkv").write_bytes(b"")
+    r = C.get(f"/api/analyze/status/Great East Rd/{DATE}")
+    assert r.status_code == 400, f"the status route must refuse this name: {r.status_code}"
+    assert r.json()["detail"], "a refusal must carry the operator copy"
+    # One helper, three callers: the fix cannot be half-applied.
+    assert HTML.count("await analyzeStatus(r.site, r.date)") == 3, "every caller must route through it"
+    assert HTML.count("fetch(`/api/analyze/status/") == 1, "no caller may still parse blind"
+    assert "{blocked: await detail(r), events: 0}" in HTML
+    # A blocked day is a row with the reason and no Queue button, and no dropdown entry.
+    assert "b.disabled = !!st.blocked" in HTML and "say.textContent = st.blocked" in HTML
+    assert "if (st.events) opts.push(" in HTML, "Counts lists analyzed days only"
+
+
+def refine_buttons_follow_the_payload_targets():
+    """Config's refine_targets override must govern the buttons, with the old pcu-keys
+    derivation left only as fallback for a server that predates the field."""
+    src = re.search(r"^const refineTargets = .*?;$", HTML, re.S | re.M)
+    assert src, "refineTargets must stay a plain top-level const this test can lift out"
+    node = shutil.which("node")
+    if not node:
+        assert "CNT.data.refine_targets\n" in src.group(0), "the payload field comes first"
+        print("     note: node absent — refineTargets checked by source, not by running it")
+        return
+    served = {"refine_targets": ["lgv", "mgv", "hgv_mineral"],
+              "pcu_factors": {"passenger_car": 1.0, "other": 0.5}, "classes": ["goods_vehicle"]}
+    old = {"pcu_factors": {"passenger_car": 1.0, "lgv": 1.5}, "classes": ["goods_vehicle"]}
+    script = f"let CNT;\n{src.group(0)}\n" + f"""
+const run = data => {{ CNT = {{data}}; return refineTargets(); }};
+console.log(JSON.stringify([run({json.dumps(served)}), run({json.dumps(old)})]));"""
+    out = subprocess.run([node, "-e", script], capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    payload, fallback = json.loads(out.stdout)
+    assert payload == ["lgv", "mgv", "hgv_mineral"], f"the payload list must win outright: {payload}"
+    assert "passenger_car" not in payload, f"pcu keys must not leak in beside it: {payload}"
+    assert sorted(fallback) == ["goods_vehicle", "lgv", "passenger_car"], fallback
+
+
 seed()
 check("counts section carries the chrome", section_has_the_chrome)
 check("design values: hatch, accents, numerals, probe copy", design_values_present)
@@ -276,6 +319,8 @@ check("probe cells key to an arm and a bin", probe_cells_key_to_an_arm)
 check("refine panel renders with its applied-count chip", refine_panel_renders_with_its_chip)
 check("refine grid fetches and saves on the contract URLs", refine_grid_uses_the_contract_urls)
 check("a paired refinement sends both crossings", a_paired_refinement_sends_both_crossings)
+check("a refused status blocks the day, never loses it", a_refused_status_blocks_the_day_never_loses_it)
+check("refine buttons follow the payload's targets", refine_buttons_follow_the_payload_targets)
 
 print(f"\n{'FAILED: ' + ', '.join(FAILS) if FAILS else 'all passed'}")
 sys.exit(1 if FAILS else 0)
