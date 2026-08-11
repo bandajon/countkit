@@ -186,6 +186,10 @@ class CropWriter:
 # ---------------------------------------------------------------- analysis
 
 def db_path(data_root, site):
+    # Site names become filenames here and in every jsonl sidecar: a hostile
+    # "../../tmp/evil" from a raw route parameter must die at the chokepoint,
+    # not be handed to sqlite to create a database outside data_root.
+    calib._check("site", site)
     p = Path(data_root) / "waves"
     p.mkdir(parents=True, exist_ok=True)
     return p / f"{site}.db"

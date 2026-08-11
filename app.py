@@ -338,6 +338,7 @@ def analyze_retry(body: dict = Body(default={})):
 def analyze_status(site: str, date: str):
     """Whether this site-day is queueable, already analyzed, or blocked — with the
     blocking copy the row shows verbatim."""
+    _calib(aggregate.check_names, site, date)   # site becomes the DB filename below
     try:
         engine.check_ready(ingest_root(), date, site)
         blocked = ""
@@ -501,9 +502,41 @@ def flag_post(body: dict = Body(default={})):
     site, date = body.get("site") or "", body.get("date") or ""
     if not (site and date):
         raise HTTPException(400, "site and date are required")
-    aggregate.add_flag(data_root(), site, date,
-                       {k: body.get(k) for k in ("entry", "exit", "bin", "entry_ts")})
+    _calib(aggregate.add_flag, data_root(), site, date,
+           {k: body.get(k) for k in ("entry", "exit", "bin", "entry_ts")})
     return aggregate.read_flags(data_root(), site, date)
+
+
+# Three segments, so /api/refine/{site}/{date} cannot swallow it — declared first
+# anyway, since declaration order is what decides that if either ever grows a path.
+@app.get("/api/refine/events/{site}/{date}")
+def refine_events_get(site: str, date: str, cls: str = None, limit: int = 30,
+                      offset: int = 0):
+    return _calib(aggregate.refine_events, site, date, data_root(), CONFIG,
+                  cls, limit, offset)
+
+
+@app.get("/api/refine/{site}/{date}")
+def refine_get(site: str, date: str):
+    return _calib(aggregate.read_refinements, data_root(), site, date)
+
+
+@app.post("/api/refine")
+def refine_post(body: dict = Body(default={})):
+    site, date = body.get("site") or "", body.get("date") or ""
+    rows = body.get("rows") or []
+    if not (site and date and rows):
+        raise HTTPException(400, "site, date and at least one row are required")
+    allowed = aggregate.refine_targets(CONFIG)
+    # Whole batch or nothing: the UI saves an entry and its paired exit together, and
+    # writing half of that pair would unpair the movement at the next aggregation.
+    for r in rows:
+        to = (r or {}).get("to")
+        if to not in allowed:
+            raise HTTPException(400, f"{to!r} is not a class you can assign — pick one "
+                                     f"of: {', '.join(allowed)}")
+    _calib(aggregate.add_refinements, data_root(), site, date, rows)
+    return aggregate.read_refinements(data_root(), site, date)
 
 
 @app.get("/api/offsets/{site}/{date}")

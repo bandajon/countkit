@@ -216,11 +216,14 @@ def unknown_class_and_pcu():
            ("cam1", 2, "oxcart", GE, "entry", ts("07:06")),
            ("cam1", 3, "bus", GE, "entry", ts("07:07"))])
     r = run()
+    # Report classes come from the config table, not from code — name them through it,
+    # or re-pointing the taxonomy (TrafficCamNet -> a TOR fine-tune) reds this test.
+    cmap = aggregate.class_map(app.CONFIG)
     cls = [b for b in r["bins"] if b["total"]][0]["arms"][GE]["classes"]
-    assert cls == {"car": 1, "other": 1, "bus": 1}, cls
+    assert cls == {cmap["car"]: 1, cmap["bus"]: 1, "other": 1}, cls
     assert r["qa"]["unmapped"] == {"oxcart": 1}, r["qa"]["unmapped"]
-    # 1 car (1.0) + 1 bus (2.5) + 1 unmapped (defaults to 1.0) = 4.5
-    assert aggregate.apply_pcu(cls, r["pcu_factors"]) == 4.5, r["pcu_factors"]
+    # 2 cars at the default 1.0 + 1 bus at 2.5: a class with no factor is one car's worth.
+    assert aggregate.apply_pcu({"car": 2, "bus": 1}, {"bus": 2.5}) == 4.5
 
 
 # ---- probe join ----
@@ -391,6 +394,111 @@ def api_serves_counts():
         assert k in body, k
 
 
+# ---- human class refinement, applied as a read-time overlay ----
+
+def refine(rows):
+    """Replace the overlay. It is append-only in the field; each check needs its own."""
+    aggregate.refine_path(app.data_root(), SITE, DATE).write_text("")
+    aggregate.add_refinements(app.data_root(), SITE, DATE, rows)
+
+
+def refinement_overlays_the_class():
+    write([("cam1", 1, "truck", GE, "entry", ts("11:00")),
+           ("cam1", 1, "truck", CH, "exit", ts("11:00", 20))])
+    refine([{"cam": "cam1", "obj_id": 1, "line": GE, "kind": "entry",
+             "ts": ts("11:00"), "to": "hgv_mineral"}])
+    r = run()
+    cls = [b for b in r["bins"] if b["total"]][0]["arms"][GE]["classes"]
+    assert cls == {"hgv_mineral": 1}, cls
+    assert [m["cls"] for m in r["movements"]["od"]] == ["hgv_mineral"], r["movements"]
+    assert r["qa"]["refined"] == 1, r["qa"]["refined"]
+    # Nothing edited the event: the detector's own call is still there to audit.
+    en = [e for e in aggregate.load_events(app.data_root(), SITE, DATE)
+          if e["kind"] == "entry"][0]
+    assert en["cls"] == "truck" and en["refined"] == "hgv_mineral", en
+
+
+def later_row_wins_and_a_stale_row_is_not_coverage():
+    write([("cam1", 1, "truck", GE, "entry", ts("11:00"))])
+    refine([{"cam": "cam1", "obj_id": 1, "line": GE, "kind": "entry",
+             "ts": ts("11:00"), "to": "lgv"},
+            {"cam": "cam1", "obj_id": 1, "line": GE, "kind": "entry",
+             "ts": ts("11:00"), "to": "hgv_non_mineral"},
+            # Matches no event — what a re-analysis leaves behind.
+            {"cam": "cam1", "obj_id": 99, "line": GE, "kind": "entry",
+             "ts": ts("11:30"), "to": "lgv"}])
+    r = run()
+    assert r["classes"] == ["hgv_non_mineral"], r["classes"]
+    assert r["qa"]["refined"] == 1, "a stale row must not claim review coverage"
+    assert aggregate.read_refinements(app.data_root(), SITE, DATE)["count"] == 3
+
+
+def a_refined_tier2_pair_needs_both_ends():
+    write([("cam1", 1, "truck", GE, "entry", ts("12:00")),
+           ("cam2", 70, "truck", CH, "exit", ts("12:00", 30))])
+    both = [{"cam": "cam1", "obj_id": 1, "line": GE, "kind": "entry",
+             "ts": ts("12:00"), "to": "hgv_mineral"},
+            {"cam": "cam2", "obj_id": 70, "line": CH, "kind": "exit",
+             "ts": ts("12:00", 30), "to": "hgv_mineral"}]
+    refine(both)
+    assert run()["movements"]["tier2"] == 1, "both ends refined: still one movement"
+    # And this is why the UI saves the pair: tier 2 matches on class, so a half-refined
+    # movement silently falls apart at the next aggregation.
+    refine(both[:1])
+    m = run()["movements"]
+    assert m["tier2"] == 0 and m["unpaired"] == 2, m
+
+
+def refine_targets_are_config_then_the_classes_table():
+    assert aggregate.refine_targets({**app.CONFIG, "refine_targets": ["lgv", "mgv"]}) \
+        == ["lgv", "mgv"], "an explicit list wins verbatim"
+    # Default: the PCU table plus every report class, so a TOR split that lives only in
+    # pcu (nothing detects hgv_mineral) is still offerable, and vice versa.
+    cfg = {"pcu": {"lgv": 1.5, "hgv_mineral": 3.0},
+           "classes": [{"model": "truck", "report": "goods_vehicle"}]}
+    assert aggregate.refine_targets(cfg) == ["goods_vehicle", "hgv_mineral", "lgv"], cfg
+    d = aggregate.refine_targets(app.CONFIG)
+    assert set(app.CONFIG["pcu"]) <= set(d), d
+    assert set(aggregate.class_map(app.CONFIG).values()) <= set(d), d
+
+
+def api_refines_a_pair_and_lists_events():
+    write([("cam1", 1, "truck", GE, "entry", ts("13:00")),
+           ("cam2", 70, "car", CH, "exit", ts("13:00", 30)),
+           ("cam1", 2, "car", GE, "entry", ts("13:05"))])
+    refine([])
+    rows = [{"cam": "cam1", "obj_id": 1, "line": GE, "kind": "entry",
+             "ts": ts("13:00"), "to": "hgv_mineral"},
+            {"cam": "cam2", "obj_id": 70, "line": CH, "kind": "exit",
+             "ts": ts("13:00", 30), "to": "hgv_mineral"}]
+    app.CONFIG["refine_targets"] = ["hgv_mineral", "lgv"]
+    try:
+        assert C.post("/api/refine", json={"site": SITE}).status_code == 400
+        bad = C.post("/api/refine", json={"site": SITE, "date": DATE,
+                                          "rows": rows + [{**rows[0], "to": "spaceship"}]})
+        assert bad.status_code == 400, bad.status_code
+        assert "hgv_mineral" in bad.json()["detail"], bad.json()
+        assert aggregate.read_refinements(app.data_root(), SITE, DATE)["count"] == 0, \
+            "one bad target rejects the whole batch — nothing written"
+
+        ok = C.post("/api/refine", json={"site": SITE, "date": DATE, "rows": rows})
+        assert ok.status_code == 200 and ok.json()["count"] == 2, ok.json()
+        assert C.get(f"/api/refine/{SITE}/{DATE}").json()["count"] == 2
+
+        one = C.get(f"/api/refine/events/{SITE}/{DATE}?cls=hgv_mineral").json()
+        assert one["total"] == 1 and len(one["events"]) == 1, one
+        e = one["events"][0]
+        assert e["cls"] == "truck" and e["rc"] == "hgv_mineral" and e["refined"], e
+        assert e["paired"]["cam"] == "cam2" and e["paired"]["kind"] == "exit", e
+
+        page = C.get(f"/api/refine/events/{SITE}/{DATE}?limit=1&offset=1").json()
+        assert page["total"] == 2, "total counts the filter, not the page"
+        assert [x["obj_id"] for x in page["events"]] == [2], page["events"]
+        assert page["events"][0]["paired"] is None, "an unpaired entry pairs to nothing"
+    finally:
+        app.CONFIG.pop("refine_targets", None)
+
+
 calibrate()
 segments("cam1", ["07:00", "07:10"])
 segments("cam2", ["07:00", "07:10"])
@@ -412,6 +520,41 @@ check("QA names unset offsets and uncalibrated cameras",
 check("probe cells carry the display-cased arm", probe_cells_use_the_display_arm)
 check("an unstripped arm name does not fork a column", an_unstripped_arm_name_does_not_fork_a_column)
 check("counts route serves the UI payload", api_serves_counts)
+check("a refinement overlays the class without editing the event",
+      refinement_overlays_the_class)
+check("the later refinement wins; a stale one is not coverage",
+      later_row_wins_and_a_stale_row_is_not_coverage)
+check("refining both ends keeps a tier-2 pair; one end breaks it",
+      a_refined_tier2_pair_needs_both_ends)
+check("refine targets: config list, else the classes table",
+      refine_targets_are_config_then_the_classes_table)
+check("refine API rejects an unknown target and pages the review list",
+      api_refines_a_pair_and_lists_events)
+
+
+def hostile_names_never_reach_the_filesystem():
+    """site/date become filenames (event DB, flags, refinements, segdur cache). The
+    JSON-body routes accept arbitrary strings, so a slash-bearing site must 400 at the
+    name check — not append a jsonl outside data_root."""
+    evil = "../../outside"
+    marker = (app.data_root().parent / f"outside-2026-08-06.jsonl")
+    for req in (
+        lambda: C.post("/api/flag", json={"site": evil, "date": "2026-08-06", "bin": 1}),
+        lambda: C.post("/api/refine", json={"site": evil, "date": "2026-08-06",
+                                            "rows": [{"to": "lgv"}]}),
+        lambda: C.post("/api/flag", json={"site": "gerlache", "date": "../evil"}),
+    ):
+        r = req()
+        assert r.status_code == 400, (r.status_code, r.text)
+    # Path params cannot carry a slash (the router 404s them), but a dot-only name
+    # can — the name check must catch what routing lets through.
+    r = C.get("/api/analyze/status/../2026-08-06")
+    assert r.status_code in (400, 404), (r.status_code, r.text)
+    assert not marker.exists(), "a hostile site name wrote outside data_root"
+
+
+check("hostile site/date names never reach the filesystem",
+      hostile_names_never_reach_the_filesystem)
 
 print(f"\n{'FAILED: ' + ', '.join(FAILS) if FAILS else 'all passed'}")
 sys.exit(1 if FAILS else 0)
