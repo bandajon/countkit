@@ -9,6 +9,81 @@ exported as Excel + PDF.
 Spec: `docs/COUNTKIT_PRD.md` · UI design: `docs/COUNTKIT_DESIGN_PROMPT.md` ·
 probe-data licensing research: `docs/CONGESTION_FUSION_RESEARCH.md`.
 
+## From download to your first count
+
+The whole path, in order. Docker is the recommended way to run on a Jetson
+(the GPU stack ships in the image); the bare-metal notes are inline where the
+two differ.
+
+**1 · Install.**
+
+```
+git clone https://github.com/bandajon/countkit.git && cd countkit
+docker/smoke.sh yolo-jetson              # Docker path — see "First boot on a Jetson"
+```
+
+Bare metal instead: `pip install -r requirements.txt`, and for real detection
+also `pip install ultralytics opencv-python-headless`. On a Jetson that pip
+torch is CPU-only — analysis works but is many times slower than the
+`yolo-jetson` image, which carries NVIDIA's CUDA torch. Fine for a first
+short test; use the image for real site-days.
+
+**2 · Point it at the footage drive.** Mount the drive (by UUID — see the
+fstab block below), then:
+
+- Docker: a `.env` file next to `docker-compose.yaml`:
+  `INGEST_DIR=/media/<drive>/ingest` and `DATA_DIR=/media/<drive>/countkit-data`.
+  Leave the paths in `config.yaml` alone.
+- Bare metal: absolute paths directly in `config.yaml` —
+  `ingest_root: /media/<drive>/ingest`, `data_root: /media/<drive>/countkit-data`.
+  A `data_root` change needs an app restart.
+
+**3 · Lay the footage out.** Analysis reads
+`<ingest_root>/<date>/<site>/<cam>/*.mkv` — e.g.
+`/media/ssd/ingest/2026-08-11/gerlache/cam1/20260811-070000.mkv`. FieldKit's
+nvr_pull produces this tree ready-made. Footage from anywhere else, build it
+by hand:
+
+- One folder per camera; each video segment named by the **wallclock time of
+  its first frame**: `YYYYMMDD-HHMMSS.mkv` (H.264 in Matroska — what NVRs and
+  FieldKit record). The filename IS the timestamp; nothing else supplies it.
+- `manifest.json` beside the camera folders:
+  `{"time_offset_s": {"cam1": 0.0, "cam2": 0.0}}` — seconds to ADD to reach
+  true Africa/Lusaka time. Write `0.0` explicitly when the filenames are
+  already true local time: an absent camera **blocks** analysis, because
+  unset is not zero.
+- `touch .verified` beside the manifest, last — it marks the site-day
+  complete and analyzable.
+
+No drive at the box? `r2_ingest.py push/pull` moves the same tree through the
+R2 bucket — see "Where the footage comes from".
+
+**4 · Pick the detector.** In `config.yaml`: `detector: yolo` (the `yolo:`
+block tunes model/stride/imgsz/conf; defaults are sensible). The example
+ships `detector: ""` = mock, which replays test fixtures and will fail on
+real footage. DeepStream is the other real backend — see the `ds-*` notes.
+
+**5 · Start it.** `docker compose --profile yolo-jetson up -d` (or bare
+metal: `python3 app.py`), then open `http://<nano>:8090`.
+
+**6 · Label** — per camera: grab the reference frame, draw ENTRY and EXIT
+gates, name each gate's arm, check the chevron points the way counted
+traffic travels. The arm map above the canvas must show every arm **owned**
+— unowned arms can't count, double-owned arms count twice.
+
+**7 · Analyze** — the site-day appears once `.verified` exists; unset clock
+offsets block it (set them in Counts → Offsets or in the manifest). Queue
+it and watch progress. The first yolo run downloads the model weights
+(~20 MB, once, into `data/models/`) — the box needs internet that one time,
+or copy a `.pt` there yourself.
+
+**8 · Counts** — QA first (pairing tiers, coverage with gaps hatched,
+offsets), then bins, O-D matrix, and the verification drawer with per-vehicle
+evidence crops. Read-only by design; flag anything doubtful.
+
+**9 · Report** — export the Excel + PDF bundle with its sha256 manifest.
+Figures summed over no-footage bins are starred, never silently zeroed.
+
 ## Run
 
 ```
@@ -19,8 +94,10 @@ python3 tests/test_acceptance.py   # the PRD acceptance list, end to end
 
 First boot copies `config.example.yaml` to `config.yaml`. Point `ingest_root`
 at the tree FieldKit's nvr_pull produces (`<date>/<site>/<cam>/*.mkv` with a
-`.verified` marker). Off-Jetson, analysis replays `fixtures/`; on the Orin,
-set `nvinfer_config` and the same engine drives DeepStream
+`.verified` marker) — an absolute path reaches an external drive. Real
+detection bare-metal needs `pip install ultralytics opencv-python-headless`
+and `detector: yolo`; with `detector` empty, analysis replays `fixtures/`.
+On the Orin, set `nvinfer_config` and the same engine drives DeepStream
 (`deepstream_runner.py`). The RTX 5080 rig is that one config key, not a port.
 
 ## Run in Docker
@@ -84,7 +161,9 @@ off, `docker compose --profile yolo-jetson logs` is where it says so.
 on an external drive: put `INGEST_DIR=/media/<drive>/ingest` (and
 `DATA_DIR=/media/<drive>/countkit-data` — crops are the bulky part) in a `.env`
 file next to the compose file. Leave `ingest_root: ./ingest` in `config.yaml`
-alone; inside the container the path doesn't change.
+alone; inside the container the path doesn't change. (Bare metal has no
+mounts: absolute `ingest_root`/`data_root` paths in `config.yaml` do the same
+job.)
 
 Mount that drive by UUID (`/dev/sda1` moves between boots) and before Docker
 wants it. `blkid` prints the UUID; in `/etc/fstab`:
