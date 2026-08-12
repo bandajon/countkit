@@ -124,7 +124,8 @@ def object_shape():
 
 def model_args_passed():
     kw = DET.model.calls[0]
-    assert kw == {"persist": True, "verbose": False, "imgsz": 960, "conf": 0.3}, kw
+    assert kw == {"persist": True, "verbose": False, "imgsz": 960, "conf": 0.3,
+                  "device": None}, kw
 
 
 def zero_conf_reaches_the_model():
