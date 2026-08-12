@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT))
 TMP = Path(tempfile.mkdtemp(prefix="countkit-counts-")).resolve()
 os.environ["COUNTKIT_ROOT"] = str(TMP)
 
+import aggregate                                # noqa: E402
 import app                                      # noqa: E402
 import calib                                    # noqa: E402
 import engine                                   # noqa: E402
@@ -307,6 +308,58 @@ console.log(JSON.stringify([run({json.dumps(served)}), run({json.dumps(old)})]))
     assert sorted(fallback) == ["goods_vehicle", "lgv", "passenger_car"], fallback
 
 
+def the_finder_and_its_scrubber_are_wired():
+    """The spot-fix surface: unpair a row, find the right exit, and scrub the other
+    camera's own footage to decide which candidate it actually was."""
+    for s in ('id="finder"', 'id="fx-rows"', 'id="fx-frame"', 'id="fx-clock"',
+              'id="fx-cams"', 'id="fx-steps"', 'id="fx-play"', 'id="fx-close"'):
+        assert s in SECTION, s
+    for step in ('data-step="-5"', 'data-step="-1"', 'data-step="1"', 'data-step="5"'):
+        assert step in SECTION, step
+    assert "the events themselves are" in SECTION and "never edited" in SECTION, \
+        "the panel must say a verdict is an overlay, not an edit"
+    # A manual pair is better evidence than a tracker id and must not wear tier 1's label.
+    assert "0: ['s-ok', 'manual']" in HTML, "a manual pair needs its own chip"
+    assert "m.tier === 0 ? 'Undo' : 'Unpair'" in HTML
+    assert "action: 'unpair'" in HTML and "action: 'pair'" in HTML
+    assert "`/api/pair/candidates/${CNT.site}/${CNT.date}?${q}`" in HTML
+    assert "`/api/frame-at/${CNT.site}/${CNT.date}/`" in HTML
+    # Autoplay is a timer on a hideable panel: it must be torn down, not just paused.
+    assert "setInterval(() => { FX.ts += 1; fxFrame(); }, 1000)" in HTML
+    assert HTML.count("clearInterval(FX.timer)") == 2, "close and re-arm both clear it"
+    # Same rule as every other counts fetch: the operator copy is the fix instruction.
+    assert "box.innerHTML = `<p class=\"res bad\">${esc(await detail(r))}</p>`" in HTML
+    assert "fb.textContent = 'Find exit'" in HTML, "an unpaired refine card offers it"
+
+
+def the_bodies_the_drawer_sends_are_accepted():
+    """Shape the unpair body exactly as mvEnds does, then walk the reviewer's path:
+    detach the inferred pair, and the finder offers its exit straight back."""
+    m = C.get(f"/api/movements/{SITE}/{DATE}").json()["movements"][0]
+    assert m["entry_obj"] == 2 and m["exit_obj"] == 9, m
+    ends = {"entry": {"cam": m["entry_cam"], "obj_id": m["entry_obj"], "line": m["entry"],
+                      "kind": "entry", "ts": m["entry_ts"]},
+            "exit": {"cam": m["exit_cam"], "obj_id": m["exit_obj"], "line": m["exit"],
+                     "kind": "exit", "ts": m["exit_ts"]}}
+    try:
+        r = C.post("/api/pair", json={"site": SITE, "date": DATE, "action": "unpair",
+                                      **ends})
+        assert r.status_code == 200 and r.json()["count"] == 1, r.json()
+        mv = C.get(f"/api/counts/{SITE}/{DATE}").json()["movements"]
+        assert mv["tier2"] == 0 and mv["unpaired"] == 2, mv
+        c = C.get(f"/api/pair/candidates/{SITE}/{DATE}", params=ends["entry"]).json()
+        assert [x["obj_id"] for x in c["candidates"]] == [9], c
+        assert c["candidates"][0]["clock"] == "08:05:50", c["candidates"][0]
+        ok = C.post("/api/pair", json={"site": SITE, "date": DATE, "action": "pair",
+                                       **ends})
+        assert ok.status_code == 200, ok.json()
+        mv = C.get(f"/api/counts/{SITE}/{DATE}").json()["movements"]
+        assert mv["tier2"] == 0 and mv["unpaired"] == 0, "the manual pair stands instead"
+        assert C.get(f"/api/movements/{SITE}/{DATE}").json()["movements"][-1]["tier"] == 0
+    finally:
+        aggregate.pair_path(app.data_root(), SITE, DATE).unlink()
+
+
 seed()
 check("counts section carries the chrome", section_has_the_chrome)
 check("design values: hatch, accents, numerals, probe copy", design_values_present)
@@ -321,6 +374,8 @@ check("refine grid fetches and saves on the contract URLs", refine_grid_uses_the
 check("a paired refinement sends both crossings", a_paired_refinement_sends_both_crossings)
 check("a refused status blocks the day, never loses it", a_refused_status_blocks_the_day_never_loses_it)
 check("refine buttons follow the payload's targets", refine_buttons_follow_the_payload_targets)
+check("the find-exit drawer and its frame scrubber are wired", the_finder_and_its_scrubber_are_wired)
+check("the pair bodies the drawer sends are accepted", the_bodies_the_drawer_sends_are_accepted)
 
 print(f"\n{'FAILED: ' + ', '.join(FAILS) if FAILS else 'all passed'}")
 sys.exit(1 if FAILS else 0)

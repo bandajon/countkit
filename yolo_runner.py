@@ -68,6 +68,9 @@ class YoloDetector:
                           "inference size in pixels, 32 or more")
         self.conf = _num(cfg, "conf", float, 0.3, lambda v: 0.0 <= v <= 1.0,
                          "detection confidence floor, between 0.0 and 1.0")
+        # None = ultralytics' own choice (CUDA when present, else CPU). Set it where
+        # autodetection guesses wrong — e.g. "mps" on an Apple-silicon host.
+        self.device = cfg.get("device") or None
         self.frame = None                  # last decoded frame, for crop_for
         d = Path(ingest_root) / date / site / cam
         # Wallclock order: engine.segment_epoch turns each name back into a real time.
@@ -119,7 +122,7 @@ class YoloDetector:
 
     def _objects(self, frame):
         r = self.model.track(frame, persist=True, verbose=False,
-                             imgsz=self.imgsz, conf=self.conf)[0]
+                             imgsz=self.imgsz, conf=self.conf, device=self.device)[0]
         b = r.boxes
         # boxes.id is None until the tracker has confirmed tracks — those early frames
         # have detections but nothing engine can follow across a line, so they count

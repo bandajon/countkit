@@ -189,6 +189,9 @@
   .mv figure { margin:0; }
   .mv figcaption { margin-top:4px; font:11px/1.3 var(--mono); color:var(--dim); }
   .mv figcaption .prov { letter-spacing:.08em; text-transform:uppercase; opacity:.75; }
+  /* A full frame, not a crop: it is how a reviewer tells two similar vehicles apart. */
+  #fx-frame { margin:10px 0; }
+  #fx-frame img { max-width:100%; border:1px solid var(--line); border-radius:2px; }
   .internal { font:10px/1 var(--mono); letter-spacing:.14em; text-transform:uppercase;
               color:var(--warn); }
 
@@ -352,6 +355,28 @@
       </div>
       <div class="sub">view only — flagging records a QA note and never changes a count</div>
       <div id="dr-rows"></div>
+    </div>
+
+    <div class="panel" id="finder" hidden>
+      <div class="row">
+        <span class="eyebrow">find exit</span>
+        <span class="grow mono" id="fx-title"></span>
+        <span class="internal">internal qa</span>
+        <button class="btn" id="fx-close">Close</button>
+      </div>
+      <div class="sub">a pairing verdict is a reviewer overlay — the events themselves are
+        never edited, and re-running the analysis clears it</div>
+      <div class="row" id="fx-steps">
+        <span class="seg" id="fx-cams"></span>
+        <button class="btn" data-step="-5">−5s</button>
+        <button class="btn" data-step="-1">−1s</button>
+        <button class="btn" data-step="1">+1s</button>
+        <button class="btn" data-step="5">+5s</button>
+        <label class="sub"><input type="checkbox" id="fx-play"> play 1 fps</label>
+        <span class="grow mono" id="fx-clock"></span>
+      </div>
+      <div id="fx-frame"></div>
+      <div id="fx-rows"></div>
     </div>
   </section>
   <section id="report">
@@ -1276,6 +1301,14 @@ async function refineGrid() {
       mark(); refineSaveLabel();
     });
     mark();                            // a card revisited by paging keeps its staging
+    if (!e.paired) {                   // the gate leaves these behind — offer the drawer
+      const fb = document.createElement('button');
+      fb.className = 'btn';
+      fb.textContent = 'Find exit';
+      fb.onclick = () => finder({cam: e.cam, obj_id: e.obj_id, line: e.line,
+                                 kind: 'entry', ts: e.ts});
+      div.querySelector('.seg').before(fb);
+    }
     box.appendChild(div);
     div.querySelectorAll('img[data-key]').forEach(loadCrop);
   }
@@ -1470,6 +1503,107 @@ function odMatrix() {
     () => drawer(td.dataset.e, td.dataset.x));
 }
 
+// Tier 0 is a reviewer's own call on the footage — better evidence than a shared tracker
+// id, and it must never wear tier 1's "same camera" label.
+const TIER = {0: ['s-ok', 'manual'], 1: ['s-ok', 'same camera'], 2: ['s-warn', 'inferred']};
+
+// The overlay addresses events by (cam, obj_id, line, kind, ts) — a movement row carries
+// every part of that for both ends.
+const mvEnds = m => ({
+  entry: {cam: m.entry_cam, obj_id: m.entry_obj, line: m.entry, kind: 'entry',
+          ts: m.entry_ts},
+  exit: {cam: m.exit_cam, obj_id: m.exit_obj, line: m.exit, kind: 'exit', ts: m.exit_ts},
+});
+
+const FX = {en: null, ts: 0, cam: '', timer: 0};
+const fxClock = t => CAT.format(new Date(t * 1000));
+
+async function finder(en) {
+  Object.assign(FX, {en, ts: en.ts, cam: en.cam});
+  $('fx-title').textContent = `${en.line} · ${en.cam} · ${fxClock(en.ts)}`;
+  $('finder').hidden = false;
+  $('finder').scrollIntoView({block: 'nearest'});
+  const box = $('fx-rows');
+  box.innerHTML = '<p class="empty">reading candidates…</p>';
+  const q = new URLSearchParams({cam: en.cam, obj_id: en.obj_id, line: en.line,
+                                 kind: 'entry', ts: en.ts});
+  const r = await fetch(`/api/pair/candidates/${CNT.site}/${CNT.date}?${q}`);
+  if (!r.ok) { box.innerHTML = `<p class="res bad">${esc(await detail(r))}</p>`; return; }
+  const d = await r.json();
+  fxCams([...new Set([en.cam, ...d.candidates.map(c => c.cam)])]);
+  fxFrame();
+  box.innerHTML = d.candidates.length ? ''
+    : '<p class="empty">no free exit within the pairing window — scrub the other camera'
+      + ' to see whether the vehicle left at all</p>';
+  for (const c of d.candidates) {
+    const div = document.createElement('div');
+    div.className = 'mv';
+    div.innerHTML = cropFig(c.crop, c.cam, c.clock)
+      + `<span class="state ${c.rc === d.rc ? 's-ok' : 's-idle'}">${esc(c.rc)}</span>`
+      + `<span class="sub">Δt ${c.dt}s · ${esc(c.line)}</span>`;
+    const b = document.createElement('button');
+    b.className = 'btn'; b.style.marginLeft = 'auto';
+    b.textContent = 'Pair';
+    b.onclick = async () => {
+      const pr = await post('/api/pair', {site: CNT.site, date: CNT.date, action: 'pair',
+        entry: en, exit: {cam: c.cam, obj_id: c.obj_id, line: c.line, kind: 'exit',
+                          ts: c.ts}});
+      if (!pr.ok) {
+        div.insertAdjacentHTML('beforeend',
+          `<span class="res bad">${esc(await detail(pr))}</span>`);
+        return;
+      }
+      fxClose();
+      await loadCounts();
+    };
+    div.appendChild(b);
+    box.appendChild(div);
+    div.querySelectorAll('img[data-key]').forEach(loadCrop);
+  }
+}
+
+function fxCams(cams) {
+  $('fx-cams').innerHTML = cams.map(c =>
+    `<button class="btn${c === FX.cam ? ' on' : ''}" data-cam="${esc(c)}">${esc(c)}</button>`)
+    .join('');
+  $('fx-cams').querySelectorAll('button').forEach(b => b.onclick = () => {
+    FX.cam = b.dataset.cam; fxCams(cams); fxFrame();
+  });
+}
+
+async function fxFrame() {
+  $('fx-clock').textContent = fxClock(FX.ts);
+  const box = $('fx-frame');
+  const r = await fetch(`/api/frame-at/${CNT.site}/${CNT.date}/`
+    + `${encodeURIComponent(FX.cam)}?ts=${FX.ts}`);
+  // A moment inside a coverage gap has no frame. Its copy is the fix instruction, so it
+  // goes where the picture would have been rather than into a corner.
+  if (!r.ok) { box.innerHTML = `<p class="res bad">${esc(await detail(r))}</p>`; return; }
+  const img = document.createElement('img');
+  img.alt = `${FX.cam} at ${fxClock(FX.ts)}`;
+  // Revoke the frame being replaced: an hour of 1 fps autoplay is 3600 blobs otherwise.
+  const old = box.querySelector('img');
+  if (old) URL.revokeObjectURL(old.src);
+  img.src = URL.createObjectURL(await r.blob());
+  box.innerHTML = '';
+  box.appendChild(img);
+}
+
+function fxClose() {
+  clearInterval(FX.timer); FX.timer = 0;   // or it keeps pulling frames behind a hidden panel
+  $('fx-play').checked = false;
+  $('finder').hidden = true;
+}
+
+$('fx-close').onclick = fxClose;
+$('fx-steps').onclick = e => {
+  if (e.target.dataset.step) { FX.ts += +e.target.dataset.step; fxFrame(); }
+};
+$('fx-play').onchange = () => {
+  clearInterval(FX.timer);
+  if ($('fx-play').checked) FX.timer = setInterval(() => { FX.ts += 1; fxFrame(); }, 1000);
+};
+
 async function drawer(entry, exit) {
   const keep = periodBins();
   const rm = await fetch(`/api/movements/${CNT.site}/${CNT.date}`
@@ -1492,13 +1626,33 @@ async function drawer(entry, exit) {
     const div = document.createElement('div');
     div.className = 'mv';
     const flagged = CNT.flags.some(f => f.entry_ts === m.entry_ts);
+    const [cls, label] = TIER[m.tier] || TIER[2];
     div.innerHTML = cropFig(m.crops[0], m.entry_cam, m.entry_clock)
       + cropFig(m.crops[1], m.exit_cam, m.exit_clock)
-      + `<span class="state ${m.tier === 2 ? 's-warn' : 's-ok'}">`
-      + `${m.tier === 2 ? 'inferred' : 'same camera'}</span>`
+      + `<span class="state ${cls}">${label}</span>`
       + `<span class="sub">${esc(m.cls)} · Δt ${m.dt}s · ${m.bin_start.slice(11, 16)}</span>`;
+    // Detaching a pair is the one drawer action that does move a number, so it says so
+    // by refreshing the counts — and then offers the entry a better exit.
+    const un = document.createElement('button');
+    un.className = 'btn'; un.style.marginLeft = 'auto';
+    un.textContent = m.tier === 0 ? 'Undo' : 'Unpair';
+    un.onclick = async () => {
+      const ends = mvEnds(m);
+      const ur = await post('/api/pair', {site: CNT.site, date: CNT.date,
+                                          action: 'unpair', ...ends});
+      if (!ur.ok) {
+        un.textContent = 'Unpair failed';
+        div.insertAdjacentHTML('beforeend',
+          `<span class="res bad">${esc(await detail(ur))}</span>`);
+        return;
+      }
+      await loadCounts();
+      await drawer(entry, exit);       // the row is gone; redraw the cell it left
+      finder(ends.entry);
+    };
+    div.appendChild(un);
     const b = document.createElement('button');
-    b.className = 'btn'; b.style.marginLeft = 'auto';
+    b.className = 'btn';
     b.textContent = flagged ? 'Flagged' : 'Flag';
     b.disabled = flagged;
     b.onclick = async () => {
