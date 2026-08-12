@@ -36,6 +36,8 @@ PARTNOTE = "* includes hours with partial 15-min coverage — see coverage"
 UNPLACED = ("arms beyond the four compass points cannot be turn-labelled — see Movements")
 REFINED = ("{n} vehicle classifications refined by human review of evidence crops — "
            "detector originals retained in the raw data annex.")
+MANUAL = ("Movements manually reviewed: {p} paired, {u} unpaired (reviewer overlay) — "
+          "counted as observed, actions logged in the raw data annex.")
 TURNS = (("left", "Left"), ("straight", "Through"), ("right", "Right"), ("uturn", "U-turn"))
 
 
@@ -111,6 +113,18 @@ def _turn_cells(cells, placed, unplaced=False):
 def _refined_note(d):
     n = d["qa"].get("refined")
     return REFINED.format(n=n) if isinstance(n, (int, float)) and n > 0 else None
+
+
+def _manual(d):
+    """{paired, unpaired} of the reviewer overlay, absent key tolerated: an older
+    counts payload predates the overlay and must still export."""
+    return {**{"paired": 0, "unpaired": 0}, **(d["qa"]["pairing"].get("manual") or {})}
+
+
+def _manual_note(d):
+    m = _manual(d)
+    return MANUAL.format(p=m["paired"], u=m["unpaired"]) if m["paired"] or m["unpaired"] \
+        else None
 
 
 def _bins_in(d, period):
@@ -192,7 +206,12 @@ def _excel(path, d, config):
             ("Pairing rate %", pr["rate"]), ("Same-camera %", pr["same"]),
             ("Cross-camera inferred %", pr["inferred"]),
             ("Inferred share of paired %", pr["inferred_share"]),
+            # What the ambiguity gate refused to guess at, and what a human settled.
+            ("Ambiguous (gate held)", pr.get("ambiguous", 0)),
             ("QA flags", pr["flagged"]), ("Method", METHOD)]
+    if _manual_note(d):
+        rows += [("Manually paired", _manual(d)["paired"]),
+                 ("Manually unpaired", _manual(d)["unpaired"])]
     for cam, off in qa["offsets"].items():
         rows.append((f"Clock offset {cam} (s)", off))
     for cam, c in qa["coverage"]["per_cam"].items():
@@ -386,8 +405,9 @@ def _excel(path, d, config):
         ws.append([GAPNOTE.format(n=_total(d)[1])])
     # Wherever the method is stated, the manual split is stated with it: a refined class
     # is a human overruling the detector, and the client bought the audit trail too.
-    if _refined_note(d):
-        ws.append([_cell(_refined_note(d))])
+    for note in (_refined_note(d), _manual_note(d)):
+        if note:
+            ws.append([_cell(note)])
     wb.save(path)
 
 
@@ -562,7 +582,7 @@ def _pdf(path, d, config):
 
     fy = 24 * mm
     c.setFont("Helvetica", 6.5)
-    notes = [METHOD] + ([_refined_note(d)] if _refined_note(d) else [])
+    notes = [METHOD] + [n for n in (_refined_note(d), _manual_note(d)) if n]
     if day_g:
         notes.append(GAPNOTE.format(n=day_g))
     if not all((d.get("compass") or {}).get(a) for a in arms):

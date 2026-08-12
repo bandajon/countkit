@@ -539,6 +539,38 @@ def refine_post(body: dict = Body(default={})):
     return aggregate.read_refinements(data_root(), site, date)
 
 
+# Three segments, so /api/pair/{site}/{date} cannot swallow it — declared first anyway,
+# since declaration order is what decides that if either ever grows a path.
+@app.get("/api/pair/candidates/{site}/{date}")
+def pair_candidates_get(site: str, date: str, cam: str = "", obj_id: int = 0,
+                        line: str = "", kind: str = "entry", ts: float = 0.0):
+    return _calib(aggregate.pair_candidates, site, date, data_root(), CONFIG,
+                  cam, obj_id, line, kind, ts)
+
+
+@app.get("/api/pair/{site}/{date}")
+def pair_get(site: str, date: str):
+    return _calib(aggregate.read_pair_rows, data_root(), site, date)
+
+
+@app.post("/api/pair")
+def pair_post(body: dict = Body(default={})):
+    """One verdict per call: the reviewer is fixing a row they are looking at. Shape is
+    checked in add_pair_rows, which every writer of this file goes through."""
+    site, date = body.get("site") or "", body.get("date") or ""
+    if not (site and date):
+        raise HTTPException(400, "site and date are required")
+    _calib(aggregate.add_pair_rows, data_root(), site, date,
+           [{k: body.get(k) for k in ("action", "entry", "exit")}])
+    return aggregate.read_pair_rows(data_root(), site, date)
+
+
+@app.get("/api/frame-at/{site}/{date}/{cam}")
+def frame_at_get(site: str, date: str, cam: str, ts: float = 0.0):
+    return Response(_calib(aggregate.frame_at, ingest_root(), data_root(), site, date,
+                           cam, ts), media_type="image/jpeg")
+
+
 @app.get("/api/offsets/{site}/{date}")
 def offsets_get(site: str, date: str):
     """Every camera of the site-day, with null for the ones still unset."""

@@ -91,11 +91,16 @@ def seed():
     for hhmm, n in (("07:00", 40), ("07:15", 30), ("07:30", 20), ("07:45", 10)):
         for k in range(n):
             oid += 1
-            cls = "bus" if hhmm == "07:00" and k < 2 else "car"
+            # The two buses sit at either end of the quarter rather than side by side.
+            # 38 cars enter within 40 s of each other, so a car exit could belong to any
+            # of them and the ambiguity gate would rightly pair none of them; a bus has
+            # exactly one rival, and it is 39 s away.
+            cls = "bus" if hhmm == "07:00" and k in (0, 39) else "car"
             evs.append(("cam1", oid, cls, GE, "entry", ts(hhmm, k)))
-    # The 07:00:39 car leaves through cam2's view of Church Rd 20 s later: no shared
-    # tracker id, so pairing can only infer it — tier 2.
-    evs.append(("cam2", 900, "car", CH, "exit", ts("07:00", 59)))
+    # The 07:00:39 bus leaves through cam2's view of Church Rd 20 s later: no shared
+    # tracker id, so pairing can only infer it — tier 2. The other bus is 59 s out, well
+    # outside AMBIGUITY_S, so nothing rivals the match and the gate lets it stand.
+    evs.append(("cam2", 900, "bus", CH, "exit", ts("07:00", 59)))
     write(evs)
     # Both cameras record 07:00–08:00, stop for an hour, come back at 09:00.
     segs = [ts(f"07:{m:02d}") for m in range(0, 60, 10)] + [ts("09:00"), ts("09:10")]
@@ -286,6 +291,62 @@ def an_inferred_cell_is_labelled():
     assert "1 (1 inf)" in flat, [v for v in flat if v]
     assert any(str(v).startswith("AM peak — entry") for v in flat), flat[:8]
     assert any(str(v).startswith("Full day — entry") for v in flat), "day block missing"
+
+
+def an_ambiguous_movement_is_never_annotated():
+    """One entry and two same-class exits 3 s apart on the other camera: the footage
+    cannot say which one the vehicle took, so tier 2 pairs neither. No cell may print a
+    turning volume — an "(inf)" label on a coin toss is exactly the claim the warranty
+    argument cannot survive."""
+    write([("cam1", 1, "car", GE, "entry", ts("07:00")),
+           ("cam2", 800, "car", CH, "exit", ts("07:00", 20)),
+           ("cam2", 801, "car", CH, "exit", ts("07:00", 23))])
+    try:
+        d = payload()
+        assert d["movements"]["od"] == [], d["movements"]
+        read = sheet(d, "ambiguous")
+        for name in ("Movements", "Turns"):
+            flat = [str(v) for r in read(name) for v in r if v is not None]
+            assert not any("inf)" in v for v in flat), (name, [v for v in flat if "inf" in v])
+    finally:
+        seed()          # every later check reads the survey morning back off the DB
+
+
+def a_manual_pair_is_disclosed_but_not_annotated():
+    """The overlay folds into the observed numbers — no third annotation per cell — so
+    the audit trail is the sidecar plus one disclosure line. A manual pair is a human on
+    the footage, so it must never be marked "(inf)" as if a heuristic had guessed it."""
+    wb = load_workbook(bundle(f"{STEM}.xlsx"))
+    plain = [str(v) for s in ("Method", "Summary") for r in cell_rows(wb[s])
+             for v in r if v is not None]
+    assert not any("manually reviewed" in v for v in plain), "no overlay, no line"
+    # The 07:00:00 bus went nowhere on its own; the reviewer says it left by Church Rd.
+    aggregate.add_pair_rows(app.data_root(), SITE, DATE, [
+        {"action": "pair",
+         "entry": {"cam": "cam1", "obj_id": 1, "line": GE, "kind": "entry",
+                   "ts": ts("07:00")},
+         "exit": {"cam": "cam2", "obj_id": 900, "line": CH, "kind": "exit",
+                  "ts": ts("07:00", 59)}}])
+    try:
+        d = payload()
+        assert d["qa"]["pairing"]["manual"]["paired"] == 1, d["qa"]["pairing"]
+        read = sheet(d, "manual")
+        # The manual pair displaced the tier-2 one: still one movement out of Great East
+        # Rd, and it is a plain number. (Which turn column it lands in is compass work,
+        # covered by turns_sheet_splits_left_through_right.)
+        cell = next(r for r in read("Turns") if r[0] == "07:00" and r[1] == GE)
+        assert cell[-1] == 1 and 1 in cell[2:-1], cell
+        flat = [str(v) for r in read("Turns") for v in r if v is not None]
+        assert not any("inf)" in v for v in flat), [v for v in flat if "inf" in v]
+        method = {r[0]: r[1] for r in read("Method") if r and r[0]}
+        assert method["Manually paired"] == 1 and method["Manually unpaired"] == 0, method
+        assert method["Ambiguous (gate held)"] == 0, method
+        # The prose line sits with its twin, the refined-classes note, on Summary.
+        line = [str(v) for r in read("Summary") for v in r
+                if v and "manually reviewed" in str(v)]
+        assert line == [report.MANUAL.format(p=1, u=0)], line
+    finally:
+        aggregate.pair_path(app.data_root(), SITE, DATE).unlink()
 
 
 def hourly_rolls_the_quarter_hours_up():
@@ -505,6 +566,10 @@ check("a total spanning a gap is starred and footnoted", a_day_total_over_a_gap_
 check("a half-day with no peak says so, never a zero grid", a_missing_peak_is_named_not_zeroed)
 check("a formula-shaped arm name is defused", a_formula_arm_name_cannot_execute_or_crash)
 check("an inferred movement is labelled in its cell", an_inferred_cell_is_labelled)
+check("an ambiguous movement reaches no cell and no (inf) label",
+      an_ambiguous_movement_is_never_annotated)
+check("a manual pair is disclosed in Method and never labelled inferred",
+      a_manual_pair_is_disclosed_but_not_annotated)
 check("15-minute bins roll up to clock hours", hourly_rolls_the_quarter_hours_up)
 check("turning movements split L/T/R for left-hand traffic", turns_sheet_splits_left_through_right)
 check("untagged arms fall back to schematic order", untagged_arms_fall_back_to_schematic_order)

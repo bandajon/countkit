@@ -17,6 +17,11 @@ import engine
 CAT = engine.CAT                       # Africa/Lusaka, fixed, no DST — canonical in engine
 BIN_S = 900                            # 15 minutes
 PAIR_WINDOW = 120.0                    # max transit time entry -> exit
+# Tier 2 has no visual re-ID, so two similar vehicles in flight at once get paired
+# confidently and wrongly (live: one tuk-tuk matched to a van, then to a Hilux). When a
+# rival candidate's transit time is this close, tier 2 assigns NEITHER: the pairing rate
+# falls, and what is left is true. The cost is reported as qa.pairing.ambiguous.
+AMBIGUITY_S = 15.0
 SEG_S = 600                            # FieldKit segment length
 REFINE_SLACK = 120.0                   # how far a corrected clock offset may move a stamp
 OK_RATE = 85.0                         # combined pairing below this flags the site
@@ -73,20 +78,70 @@ def _move(en, ex, tier):
             "bin": bin_start(en["ts"]), "tier": tier, "dt": round(ex["ts"] - en["ts"], 2),
             "entry_cam": en["cam"], "exit_cam": ex["cam"],
             "entry_i": en["i"], "exit_i": ex["i"],     # back to the events themselves
+            # The tracker ids too: an index is only valid inside one read, and the pair
+            # overlay addresses events by (cam, obj_id, line, kind, ts).
+            "entry_obj": en["obj_id"], "exit_obj": ex["obj_id"],
             "entry_ts": en["ts"], "exit_ts": ex["ts"],
             "crops": [en["crop"], ex["crop"]]}
 
 
-def pair(evs, cmap):
-    """Tier 1: one camera saw the whole movement (same tracker id) — confident.
+def _manual(evs, rows):
+    """A reviewer's pair/unpair verdicts resolved against this read's events ->
+    ([(entry, exit)], {held event index}, qa counts).
+
+    A manual pair may join any two events regardless of camera, class or window — the
+    human watched the footage. The only rules kept are the ones the footage cannot
+    contradict: an entry, an exit, and the exit after the entry. Anything else, and
+    anything that resolves to no event (what re-analysis leaves behind, since the tracker
+    ids change), is counted stale and binds nothing. Never raises: one bad row in a
+    sidecar must not take the day's counts down with it."""
+    idx = _pair_index(rows)
+    keys = [k for r in idx.values()
+            for k in (_event_key(r.get("entry")), _event_key(r.get("exit"))) if k]
+    found = _resolve_keys(evs, keys)
+    pairs, held, claimed, stale, unpaired = [], set(), set(), 0, 0
+    for k, r in idx.items():
+        en, ex = found.get(k), found.get(_event_key(r.get("exit")) or ())
+        if en is None or en["kind"] != "entry":
+            stale += 1
+            continue
+        if r.get("action") == "unpair":
+            # Detaching by entry alone leaves the exit free to be re-inferred elsewhere,
+            # so the UI sends both halves of the row it is unpairing when it has them.
+            held |= {en["i"]} | ({ex["i"]} if ex is not None else set())
+            unpaired += 1
+            continue
+        # claimed: two entries naming one exit would otherwise count that exit twice.
+        if (ex is None or ex["kind"] != "exit" or ex["ts"] <= en["ts"]
+                or {en["i"], ex["i"]} & claimed):
+            stale += 1
+            continue
+        claimed |= {en["i"], ex["i"]}
+        pairs.append((en, ex))
+    return pairs, held, {"paired": len(pairs), "unpaired": unpaired, "stale": stale}
+
+
+def pair(evs, cmap, overrides=None, stats=None):
+    """Tier 0: a reviewer said so, watching the footage — beats both heuristics.
+    Tier 1: one camera saw the whole movement (same tracker id) — confident.
     Tier 2: a leftover entry matched to a leftover exit on ANOTHER camera by class and
-    transit time. No visual re-identification, so tier 2 is always reported separately."""
+    transit time. No visual re-identification, so tier 2 is always reported separately.
+
+    overrides: raw rows from the pair sidecar, applied read-time; stats: an optional dict
+    filled with the counts pairing_qa reports (ambiguity gate, manual overlay)."""
     for i, e in enumerate(evs):
         e["i"] = i
         # One place decides the effective class, so a human refinement flows through
         # bins, movements, QA, PCU and the report with no further plumbing.
         e["rc"] = e.get("refined") or report_class(e["cls"], cmap)
     used, moves = set(), []
+
+    # held: events a reviewer detached. Excluded from both heuristics for this read, but
+    # never marked used — they must come back out as leftovers, not vanish.
+    manual, held, manual_qa = _manual(evs, overrides or [])
+    for en, ex in manual:
+        used |= {en["i"], ex["i"]}
+        moves.append(_move(en, ex, 0))
 
     by_obj = {}
     for e in evs:
@@ -98,7 +153,9 @@ def pair(evs, cmap):
         # twice is two movements, and taking the last exit in the window would both
         # mis-time the first and leave the second unpairable by construction.
         for en in entries:
-            ex = next((x for x in exits if x["i"] not in used
+            if en["i"] in used or en["i"] in held:
+                continue
+            ex = next((x for x in exits if x["i"] not in used and x["i"] not in held
                        and 0 < x["ts"] - en["ts"] <= PAIR_WINDOW), None)
             if ex is None:
                 continue
@@ -107,9 +164,10 @@ def pair(evs, cmap):
 
     # ponytail: O(entries x exits) candidate scan. A site-day is thousands of events,
     # not millions; bucket by bin if a wave ever outgrows it.
+    free = lambda e: e["i"] not in used and e["i"] not in held
     cands = []
-    for en in [e for e in evs if e["kind"] == "entry" and e["i"] not in used]:
-        for ex in [e for e in evs if e["kind"] == "exit" and e["i"] not in used]:
+    for en in [e for e in evs if e["kind"] == "entry" and free(e)]:
+        for ex in [e for e in evs if e["kind"] == "exit" and free(e)]:
             dt = ex["ts"] - en["ts"]
             if not 0 < dt <= PAIR_WINDOW or en["cam"] == ex["cam"] or en["rc"] != ex["rc"]:
                 continue
@@ -118,19 +176,40 @@ def pair(evs, cmap):
             if en["line"].strip().lower() == ex["line"].strip().lower():
                 continue
             cands.append((dt, en["i"], ex["i"], en, ex))
+    by_en, by_ex = {}, {}                 # so the rival scan reads two short lists
+    for c in cands:
+        by_en.setdefault(c[1], []).append(c)
+        by_ex.setdefault(c[2], []).append(c)
+    blocked, ambiguous = set(), set()
     for dt, i, j, en, ex in sorted(cands, key=lambda c: (c[0], c[1], c[2])):
-        if i in used or j in used:
+        if i in used or j in used or i in blocked or j in blocked:
+            continue
+        # A rival shares exactly one end with the winner (sharing both IS the winner) and
+        # is close enough in transit time that the footage cannot say which is right.
+        rivals = [c for c in by_en.get(i, []) + by_ex.get(j, [])
+                  if (c[1], c[2]) != (i, j) and abs(c[0] - dt) <= AMBIGUITY_S
+                  and not {c[1], c[2]} & (used | blocked)]
+        if rivals:
+            # Everything in the contest stays unpaired: leaving the losing entry free to
+            # take some other exit is exactly the confident wrong match this gate exists
+            # to stop.
+            blocked |= {i, j} | {c[1] for c in rivals} | {c[2] for c in rivals}
+            ambiguous |= {i} | {c[1] for c in rivals}
             continue
         used |= {i, j}
         moves.append(_move(en, ex, 2))
 
+    if stats is not None:
+        stats.update(ambiguous=len(ambiguous), manual=manual_qa)
     return moves, [e for e in evs if e["i"] not in used]
 
 
-def pairing_qa(evs, moves):
+def pairing_qa(evs, moves, stats=None):
     entries = [e for e in evs if e["kind"] == "entry"]
     total = len(entries)
-    t1 = sum(1 for m in moves if m["tier"] == 1)
+    # Tier 0 is a human on the footage — better evidence than a shared tracker id, so it
+    # folds in with tier 1 rather than being priced as inference.
+    t1 = sum(1 for m in moves if m["tier"] in (0, 1))
     t2 = sum(1 for m in moves if m["tier"] == 2)
     pct = lambda n: round(n / total * 100, 1) if total else 0.0
     paired = t1 + t2
@@ -147,6 +226,11 @@ def pairing_qa(evs, moves):
             "state": "bad" if rate < OK_RATE else
                      "warn" if inferred_share > MAX_INFERRED else "ok",
             "per_cam": per_cam,
+            # What honesty cost (entries the gate refused to guess at) and what review
+            # bought — including manual rows that bound to nothing, which is paid work
+            # gone the same way a stale refinement is.
+            "ambiguous": (stats or {}).get("ambiguous", 0),
+            "manual": (stats or {}).get("manual", {"paired": 0, "unpaired": 0, "stale": 0}),
             "flagged": 0}      # the verification drawer writes flags here
 
 
@@ -309,7 +393,9 @@ def counts(site, date, data_root, ingest_root, config):
     check_names(site, date)     # becomes filenames (DB, segdur cache) further down
     cmap = class_map(config)
     evs = load_events(data_root, site, date)
-    moves, leftovers = pair(evs, cmap)
+    pair_stats = {}
+    moves, leftovers = pair(evs, cmap, read_pair_rows(data_root, site, date)["rows"],
+                            pair_stats)
     cov = coverage(ingest_root, date, site, data_root)
 
     # Which camera owns each arm's entry line — that is the camera whose footage gap
@@ -383,7 +469,7 @@ def counts(site, date, data_root, ingest_root, config):
                      "bins_pct": round(len({t for (a, t) in probe if t in starts})
                                        / len(starts) * 100, 1) if starts else 0.0}
 
-    qa_pairing = pairing_qa(evs, moves)
+    qa_pairing = pairing_qa(evs, moves, pair_stats)
     qa_pairing["flagged"] = read_flags(data_root, site, date)["count"]
 
     cams = engine.site_day_cams(ingest_root, date, site)
@@ -441,7 +527,7 @@ def movements_detail(site, date, data_root, config, entry=None, exit=None,
     """Individual movements behind an aggregated cell, for the verification drawer.
     Inferred pairs sort first: they are the ones a human most needs to eyeball."""
     evs = load_events(data_root, site, date)
-    moves, _ = pair(evs, class_map(config))
+    moves, _ = pair(evs, class_map(config), read_pair_rows(data_root, site, date)["rows"])
     out = [m for m in moves
            if (entry is None or m["entry"] == entry)
            and (exit is None or m["exit"] == exit)
@@ -515,43 +601,166 @@ def read_refinements(data_root, site, date):
     return {"count": len(rows), "rows": rows}
 
 
+def _event_key(d):
+    """The identity a sidecar row stores for one crossing. None for a row too malformed
+    to name an event — refinements and pair verdicts both skip those rather than raise."""
+    try:
+        return (d.get("cam"), d.get("obj_id"), (d.get("line") or "").strip(),
+                d.get("kind"), round(float(d.get("ts")), 3))
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
 def _refine_index(data_root, site, date):
     """{event key: assigned class}. Append-only file, so a later row for the same event
     simply overwrites the earlier one — the last human call is the standing one."""
     idx = {}
     for r in read_refinements(data_root, site, date)["rows"]:
-        try:
-            ts = round(float(r.get("ts")), 3)
-        except (TypeError, ValueError):
-            continue
-        idx[(r.get("cam"), r.get("obj_id"), (r.get("line") or "").strip(),
-             r.get("kind"), ts)] = r.get("to")
+        k = _event_key(r)
+        if k:
+            idx[k] = r.get("to")
     return idx
 
 
-def _apply_refinements(evs, idx):
-    """Exact timestamp first, then the leftovers within REFINE_SLACK of the same
-    crossing — but only where exactly one event is in reach.
+def _resolve_keys(evs, keys):
+    """{event key: event} for the keys that resolve. Exact timestamp first, then the
+    leftovers within REFINE_SLACK of the same crossing — but only where exactly one
+    event is in reach.
 
     corrected_ts moves whenever an operator fixes a camera's clock offset and re-runs,
-    and a refinement is paid human review: keying on the exact stamp alone would void a
-    day's work silently. An ambiguous match is worse than none, so uniqueness decides."""
+    and every sidecar row is paid human review: keying on the exact stamp alone would
+    void a day's work silently. An ambiguous match is worse than none, so uniqueness
+    decides, and a key that resolves to nothing is reported rather than guessed at."""
     free = {}
     for e in evs:
         free.setdefault((e["cam"], e["obj_id"], e["line"], e["kind"]), []).append(e)
-    left = []
-    for (cam, oid, line, kind, ts), to in idx.items():
-        near = free.get((cam, oid, line, kind), [])
-        e = next((x for x in near if round(x["ts"], 3) == ts), None)
+    out, left, claimed = {}, [], set()
+    for k in keys:
+        near = free.get(k[:4], [])
+        e = next((x for x in near if round(x["ts"], 3) == k[4]), None)
         if e is None:
-            left.append(((cam, oid, line, kind, ts), to))
+            left.append(k)
         else:
-            e["refined"] = to     # the detector's own cls stays put; this is an overlay
-    for (cam, oid, line, kind, ts), to in left:
-        near = [x for x in free.get((cam, oid, line, kind), [])
-                if abs(x["ts"] - ts) <= REFINE_SLACK and not x.get("refined")]
+            out[k] = e
+            claimed.add(id(e))
+    for k in left:
+        near = [x for x in free.get(k[:4], [])
+                if abs(x["ts"] - k[4]) <= REFINE_SLACK and id(x) not in claimed]
         if len(near) == 1:
-            near[0]["refined"] = to
+            out[k] = near[0]
+            claimed.add(id(near[0]))
+    return out
+
+
+def _apply_refinements(evs, idx):
+    for k, e in _resolve_keys(evs, list(idx)).items():
+        e["refined"] = idx[k]     # the detector's own cls stays put; this is an overlay
+
+
+# ---------------------------------------------------------------- manual pairing
+
+def pair_path(data_root, site, date):
+    return _sidecar(data_root, "pair", site, date)
+
+
+def add_pair_rows(data_root, site, date, rows):
+    """A reviewer's verdict on a movement the heuristics got wrong. Stored like a
+    refinement and applied at read time: the events table stays immutable, no count is
+    ever typed over, every action is timestamped and attributable, and re-analysis wins
+    by simply no longer matching."""
+    ends = lambda d: {"cam": d.get("cam"), "obj_id": d.get("obj_id"),
+                      "line": (d.get("line") or "").strip(),  # events are stripped on load
+                      "kind": d.get("kind"), "ts": d.get("ts")}
+    out = []
+    for r in rows:
+        if r.get("action") not in ("pair", "unpair"):
+            raise ValueError("A pairing verdict must be 'pair' or 'unpair'.")
+        if not isinstance(r.get("entry"), dict):
+            raise ValueError("A pairing verdict needs the entry event it applies to.")
+        row = {"action": r["action"], "entry": ends(r["entry"]),
+               "at": datetime.now(CAT).isoformat(timespec="seconds")}
+        if isinstance(r.get("exit"), dict):
+            row["exit"] = ends(r["exit"])
+        elif r["action"] == "pair":
+            raise ValueError("Pairing an entry needs the exit event to pair it with.")
+        out.append(row)
+    with open(pair_path(data_root, site, date), "a") as f:  # validated first: a bad batch
+        for row in out:                                     # writes nothing at all
+            f.write(json.dumps(row) + "\n")
+    return len(out)
+
+
+def read_pair_rows(data_root, site, date):
+    p = pair_path(data_root, site, date)
+    rows = []
+    if p.exists():
+        rows = [json.loads(l) for l in p.read_text().splitlines() if l.strip()]
+    return {"count": len(rows), "rows": rows}
+
+
+def _pair_index(rows):
+    """{entry key: row}. Append-only file, so a later verdict on the same entry replaces
+    the earlier one — the last human call is the standing one."""
+    idx = {}
+    for r in rows:
+        k = _event_key(r.get("entry"))
+        if k:
+            idx[k] = r
+    return idx
+
+
+def pair_candidates(site, date, data_root, config, cam, obj_id, line, kind, ts,
+                    limit=30):
+    """The exits a reviewer could attach to one entry: still unpaired, inside
+    PAIR_WINDOW, same report class ahead of the rest — the Find-exit list. Sorted by
+    class before transit time, because the gate now leaves the near-miss cases unpaired
+    and the right exit is often not the closest one."""
+    evs = load_events(data_root, site, date)
+    _, leftovers = pair(evs, class_map(config), read_pair_rows(data_root, site, date)["rows"])
+    k = _event_key({"cam": cam, "obj_id": obj_id, "line": line, "kind": kind, "ts": ts})
+    en = _resolve_keys(evs, [k]).get(k) if k else None
+    if en is None or en["kind"] != "entry":
+        raise LookupError("that entry is not in this analysis any more — re-open the "
+                          "movement list and pick the row again")
+    free = {e["i"] for e in leftovers}
+    out = [{**{f: e[f] for f in ("cam", "obj_id", "line", "kind", "ts", "crop")},
+            "rc": e["rc"], "dt": round(e["ts"] - en["ts"], 2),
+            "clock": datetime.fromtimestamp(e["ts"], CAT).strftime("%H:%M:%S")}
+           for e in evs if e["kind"] == "exit" and e["i"] in free
+           and 0 < e["ts"] - en["ts"] <= PAIR_WINDOW]
+    out.sort(key=lambda c: (c["rc"] != en["rc"], c["dt"]))
+    return {"total": len(out), "rc": en["rc"],
+            "entry_clock": datetime.fromtimestamp(en["ts"], CAT).strftime("%H:%M:%S"),
+            "candidates": out[:limit]}
+
+
+def frame_at(ingest_root, data_root, site, date, cam, ts):
+    """One JPEG of what a camera saw at a wallclock moment, for the frame scrubber.
+    Nothing is written to disk — a full frame shows plates the crops crop out.
+
+    Unset offsets fall back to 0 as they do in coverage(): this only aims a viewer, and
+    analysis of an offsetless site-day is blocked long before anyone gets here."""
+    check_names(site, date)                  # both become path segments below
+    d = Path(ingest_root) / date / site / cam
+    segs = {cam: sorted((p.name, p) for p in d.glob("*.mkv")
+                        if engine.SEG_NAME.match(p.name))}
+    durs, _ = _durations(data_root, site, date, segs)
+    off = float(engine.offsets(ingest_root, date, site).get(cam, 0.0))
+    for name, path in segs[cam]:
+        start = engine.segment_epoch(name) + off
+        if start <= ts < start + durs[(cam, name)]:
+            break
+    else:
+        raise LookupError("no footage at that moment — it falls in a coverage gap")
+    try:
+        out = subprocess.run(["ffmpeg", "-v", "error", "-ss", f"{ts - start:.3f}",
+                              "-i", str(path), "-frames:v", "1", "-f", "image2", "pipe:"],
+                             capture_output=True, timeout=20)
+    except (OSError, subprocess.SubprocessError) as e:
+        raise LookupError(f"could not read {name}: {e}")
+    if not out.stdout:
+        raise LookupError(f"{name} holds that moment but would not decode a frame there")
+    return out.stdout
 
 
 def refine_targets(config):
@@ -569,7 +778,7 @@ def refine_events(site, date, data_root, config, cls=None, limit=30, offset=0):
     saves a refinement for BOTH ends at once: tier 2 pairs on class, so refining only
     the entry would unpair the movement at the next aggregation."""
     evs = load_events(data_root, site, date)
-    moves, _ = pair(evs, class_map(config))
+    moves, _ = pair(evs, class_map(config), read_pair_rows(data_root, site, date)["rows"])
     by_entry = {m["entry_i"]: m for m in moves}      # a movement is named by its entry
     ends = lambda e: {k: e[k] for k in ("cam", "obj_id", "line", "kind", "ts", "crop")}
     out = []

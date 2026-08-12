@@ -548,6 +548,221 @@ def api_refines_a_pair_and_lists_events():
         app.CONFIG.pop("refine_targets", None)
 
 
+# ---- tier 2 refuses to guess between two equally good candidates ----
+
+def pairs(rows):
+    """Replace the pair overlay. Append-only in the field; each check needs its own."""
+    aggregate.pair_path(app.data_root(), SITE, DATE).write_text("")
+    if rows:
+        aggregate.add_pair_rows(app.data_root(), SITE, DATE, rows)
+
+
+def paired_now():
+    return aggregate.pair(aggregate.load_events(app.data_root(), SITE, DATE),
+                          aggregate.class_map(app.CONFIG),
+                          aggregate.read_pair_rows(app.data_root(), SITE, DATE)["rows"])
+
+
+def a_close_rival_pairs_neither():
+    # One entry, two candidate exits 3 s apart. Nothing in the footage says which is the
+    # right one, so tier 2 must take neither — the wrong one would be a confident lie.
+    pairs([])
+    write([("cam1", 1, "car", GE, "entry", ts("17:00")),
+           ("cam2", 80, "car", CH, "exit", ts("17:00", 20)),
+           ("cam2", 81, "car", CH, "exit", ts("17:00", 23))])
+    m = run()["movements"]
+    assert m["tier2"] == 0, m
+    assert m["unpaired"] == 3, "the loser must not quietly take some other exit either"
+    assert run()["qa"]["pairing"]["ambiguous"] == 1, run()["qa"]["pairing"]
+
+
+def a_distant_rival_still_pairs():
+    # 20 s apart, outside AMBIGUITY_S: the closer one is a real answer, not a coin toss.
+    pairs([])
+    write([("cam1", 1, "car", GE, "entry", ts("17:30")),
+           ("cam2", 82, "car", CH, "exit", ts("17:30", 20)),
+           ("cam2", 83, "car", CH, "exit", ts("17:30", 40))])
+    r = run()
+    assert r["movements"]["tier2"] == 1, r["movements"]
+    assert r["qa"]["pairing"]["ambiguous"] == 0, r["qa"]["pairing"]
+    assert paired_now()[0][0]["dt"] == 20.0, paired_now()[0]
+
+
+# ---- a reviewer's verdict, applied as a read-time overlay ----
+
+def ends(cam, oid, line, kind, t):
+    return {"cam": cam, "obj_id": oid, "line": line, "kind": kind, "ts": t}
+
+
+def a_manual_pair_beats_the_heuristic():
+    # Tier 2 would take the 20 s exit; the reviewer watched the footage and says it is
+    # the 50 s one. Nothing is edited — the verdict is a row in a sidecar.
+    write([("cam1", 1, "car", GE, "entry", ts("18:00")),
+           ("cam2", 90, "car", CH, "exit", ts("18:00", 20)),
+           ("cam2", 91, "car", CH, "exit", ts("18:00", 50))])
+    pairs([])
+    assert paired_now()[0][0]["dt"] == 20.0, "tier 2 takes the closest on its own"
+    pairs([{"action": "pair",
+            "entry": ends("cam1", 1, GE, "entry", ts("18:00")),
+            "exit": ends("cam2", 91, CH, "exit", ts("18:00", 50))}])
+    moves, leftovers = paired_now()
+    assert [m["tier"] for m in moves] == [0] and moves[0]["dt"] == 50.0, moves
+    assert [e["obj_id"] for e in leftovers] == [90], leftovers
+    q = run()["qa"]["pairing"]
+    # A human on the footage is better evidence than a shared tracker id, so tier 0 is
+    # counted with tier 1 — never as inference.
+    assert q["paired"] == 1 and q["same"] == 100.0 and q["inferred"] == 0.0, q
+    assert q["manual"] == {"paired": 1, "unpaired": 0, "stale": 0}, q["manual"]
+    # And the events are untouched: the overlay is the only record of the change.
+    assert run()["movements"]["od"][0]["tier2_count"] == 0, run()["movements"]
+
+
+def an_unpair_detaches_a_tier1_pair():
+    write([("cam1", 7, "car", GE, "entry", ts("19:00")),
+           ("cam1", 7, "car", CH, "exit", ts("19:00", 20))])
+    pairs([])
+    assert run()["movements"]["tier1"] == 1, "same tracker id: tier 1 on its own"
+    pairs([{"action": "unpair", "entry": ends("cam1", 7, GE, "entry", ts("19:00"))}])
+    m = run()["movements"]
+    assert m["tier1"] == 0 and m["unpaired"] == 2, m
+    assert run()["qa"]["pairing"]["manual"]["unpaired"] == 1, run()["qa"]["pairing"]
+
+
+def the_later_verdict_wins():
+    write([("cam1", 1, "car", GE, "entry", ts("20:00")),
+           ("cam2", 95, "car", CH, "exit", ts("20:00", 20)),
+           ("cam2", 96, "car", CH, "exit", ts("20:01", 20))])
+    pairs([{"action": "pair", "entry": ends("cam1", 1, GE, "entry", ts("20:00")),
+            "exit": ends("cam2", 95, CH, "exit", ts("20:00", 20))},
+           {"action": "pair", "entry": ends("cam1", 1, GE, "entry", ts("20:00")),
+            "exit": ends("cam2", 96, CH, "exit", ts("20:01", 20))}])
+    moves, leftovers = paired_now()
+    assert len(moves) == 1 and moves[0]["dt"] == 80.0, moves
+    assert [e["obj_id"] for e in leftovers] == [95], leftovers
+    assert aggregate.read_pair_rows(app.data_root(), SITE, DATE)["count"] == 2, \
+        "both verdicts stay on disk — the file is the audit trail"
+
+
+def a_row_that_binds_to_nothing_is_visible():
+    # What a re-analysis leaves behind (new tracker ids) and what a bad client sends.
+    # Neither may bind, neither may raise, and the lost review must not be silent.
+    write([("cam1", 1, "car", GE, "entry", ts("21:00")),
+           ("cam2", 97, "car", CH, "exit", ts("21:00", 20)),
+           ("cam1", 2, "car", GE, "entry", ts("22:00")),
+           ("cam2", 98, "car", CH, "exit", ts("21:59", 40))])
+    pairs([{"action": "pair", "entry": ends("cam1", 99, GE, "entry", ts("21:00")),
+            "exit": ends("cam2", 97, CH, "exit", ts("21:00", 20))},
+           {"action": "pair", "entry": ends("cam1", 2, GE, "entry", ts("22:00")),
+            "exit": ends("cam2", 98, CH, "exit", ts("21:59", 40))}])
+    r = run()
+    assert r["qa"]["pairing"]["manual"] == {"paired": 0, "unpaired": 0, "stale": 2}, \
+        r["qa"]["pairing"]["manual"]
+    # The stale row bound nothing, so the heuristics ran over that entry as usual.
+    assert r["movements"]["tier2"] == 1, r["movements"]
+    assert all(m["tier"] != 0 for m in paired_now()[0]), paired_now()[0]
+    for bad in ({"action": "verify", "entry": ends("cam1", 1, GE, "entry", ts("21:00"))},
+                {"action": "pair", "entry": ends("cam1", 1, GE, "entry", ts("21:00"))},
+                {"action": "pair", "exit": ends("cam2", 97, CH, "exit", ts("21:00"))}):
+        try:
+            aggregate.add_pair_rows(app.data_root(), SITE, DATE, [bad])
+            raise AssertionError(f"{bad.get('action')} row was accepted")
+        except ValueError:
+            pass
+
+
+def a_verdict_survives_a_corrected_clock():
+    """Same bargain as a refinement: an operator fixing a camera's offset and re-running
+    moves every stamp, and paid review must not evaporate on a correction."""
+    write([("cam1", 1, "car", GE, "entry", ts("23:00")),
+           ("cam2", 99, "car", CH, "exit", ts("23:05"))])
+    # 300 s apart — outside PAIR_WINDOW, so only a human could have made this pair; and
+    # the row's stamps are 3 s off, as a re-run with a corrected offset leaves them.
+    pairs([{"action": "pair", "entry": ends("cam1", 1, GE, "entry", ts("23:00", 3)),
+            "exit": ends("cam2", 99, CH, "exit", ts("23:05", 3))}])
+    moves, leftovers = paired_now()
+    assert [m["tier"] for m in moves] == [0] and moves[0]["dt"] == 300.0, moves
+    assert not leftovers, leftovers
+    assert run()["qa"]["pairing"]["manual"]["stale"] == 0, run()["qa"]["pairing"]
+    pairs([])
+
+
+# ---- the Find-exit drawer and the frame scrubber ----
+
+def candidates_are_the_free_exits_same_class_first():
+    write([("cam1", 1, "truck", GE, "entry", ts("06:00")),
+           ("cam2", 60, "car", CH, "exit", ts("06:00", 10)),     # free, wrong class
+           ("cam2", 61, "truck", CH, "exit", ts("06:00", 40)),   # tier 2 takes this one
+           ("cam2", 62, "truck", CH, "exit", ts("06:01", 30)),   # free, right class
+           ("cam2", 63, "truck", CH, "exit", ts("06:10"))])      # outside PAIR_WINDOW
+    pairs([])
+    q = {"cam": "cam1", "obj_id": 1, "line": GE, "kind": "entry", "ts": ts("06:00")}
+    c = C.get(f"/api/pair/candidates/{SITE}/{DATE}", params=q).json()
+    # Same class first even though the car is nearer: with the gate leaving near misses
+    # unpaired, the right exit is often not the closest one.
+    assert [x["obj_id"] for x in c["candidates"]] == [62, 60], c["candidates"]
+    assert c["candidates"][0]["dt"] == 90.0 and c["candidates"][1]["dt"] == 10.0, c
+    assert c["candidates"][0]["clock"] == "06:01:30", c["candidates"][0]
+    assert c["total"] == 2, "61 is already paired and 63 is out of the window"
+
+    # Detach the tier-2 pair and its exit is offerable again — nearest of its class now.
+    C.post("/api/pair", json={"site": SITE, "date": DATE, "action": "unpair", "entry": q})
+    c = C.get(f"/api/pair/candidates/{SITE}/{DATE}", params=q).json()
+    assert [x["obj_id"] for x in c["candidates"]] == [61, 62, 60], c["candidates"]
+    # An entry a re-analysis has renumbered away must say so, not answer with nothing.
+    gone = C.get(f"/api/pair/candidates/{SITE}/{DATE}", params={**q, "obj_id": 999})
+    assert gone.status_code == 404 and "pick the row again" in gone.json()["detail"], gone.json()
+
+
+def the_pair_api_records_one_verdict():
+    write([("cam1", 1, "car", GE, "entry", ts("05:00")),
+           ("cam2", 50, "car", CH, "exit", ts("05:05"))])       # 300 s: no tier can pair
+    pairs([])
+    en = {"cam": "cam1", "obj_id": 1, "line": GE, "kind": "entry", "ts": ts("05:00")}
+    ex = {"cam": "cam2", "obj_id": 50, "line": CH, "kind": "exit", "ts": ts("05:05")}
+    assert C.post("/api/pair", json={"site": SITE, "action": "pair", "entry": en,
+                                     "exit": ex}).status_code == 400, "date is required"
+    for bad in ({"action": "verify", "entry": en, "exit": ex},   # not a verdict
+                {"action": "pair", "entry": en},                 # nothing to pair to
+                {"action": "unpair", "exit": ex}):               # no entry named
+        r = C.post("/api/pair", json={"site": SITE, "date": DATE, **bad})
+        assert r.status_code == 400, (bad, r.status_code)
+        assert r.json()["detail"].endswith("."), "the UI shows this text verbatim"
+    assert aggregate.read_pair_rows(app.data_root(), SITE, DATE)["count"] == 0, \
+        "a refused verdict must not reach the file"
+
+    ok = C.post("/api/pair", json={"site": SITE, "date": DATE, "action": "pair",
+                                   "entry": en, "exit": ex})
+    assert ok.status_code == 200 and ok.json()["count"] == 1, ok.json()
+    assert C.get(f"/api/pair/{SITE}/{DATE}").json()["count"] == 1
+    m = C.get(f"/api/movements/{SITE}/{DATE}").json()
+    assert m["total"] == 1 and m["movements"][0]["tier"] == 0, m
+    assert run()["movements"]["unpaired"] == 0, "both halves are spoken for"
+
+
+def a_frame_comes_back_or_the_gap_is_named():
+    d = TMP / "ingest" / DATE / SITE / "cam1"
+    segments("cam1", [])
+    made = subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                           "color=c=red:s=64x64:d=3:r=5", "-c:v", "libx264",
+                           str(d / "20260804-070000.mkv")], capture_output=True)
+    assert made.returncode == 0, made.stderr[-400:]
+    jpg = aggregate.frame_at(TMP / "ingest", app.data_root(), SITE, DATE, "cam1",
+                             ts("07:00", 1))
+    assert jpg[:2] == b"\xff\xd8", jpg[:16]        # JPEG SOI
+    r = C.get(f"/api/frame-at/{SITE}/{DATE}/cam1", params={"ts": ts("07:00", 1)})
+    assert r.status_code == 200 and r.headers["content-type"] == "image/jpeg", r.headers
+    # Three seconds of footage: a moment either side of it is a gap, never a black frame.
+    for miss in (ts("07:00", 10), ts("06:59")):
+        try:
+            aggregate.frame_at(TMP / "ingest", app.data_root(), SITE, DATE, "cam1", miss)
+            raise AssertionError(f"{miss} returned a frame from nowhere")
+        except LookupError as e:
+            assert "coverage gap" in str(e), e
+    assert C.get(f"/api/frame-at/{SITE}/{DATE}/cam1",
+                 params={"ts": ts("06:59")}).status_code == 404
+    segments("cam1", ["07:00", "07:10"])
+
+
 calibrate()
 segments("cam1", ["07:00", "07:10"])
 segments("cam2", ["07:00", "07:10"])
@@ -583,6 +798,24 @@ check("refine targets: config list, else the classes table",
       refine_targets_are_config_then_the_classes_table)
 check("refine API rejects an unknown target and pages the review list",
       api_refines_a_pair_and_lists_events)
+check("tier 2 pairs neither when the runner-up is too close to call",
+      a_close_rival_pairs_neither)
+check("tier 2 still pairs when the runner-up is outside the margin",
+      a_distant_rival_still_pairs)
+check("a manual pair beats tier 2 and counts as observed",
+      a_manual_pair_beats_the_heuristic)
+check("an unpair returns both halves to the unpaired pool",
+      an_unpair_detaches_a_tier1_pair)
+check("the later verdict on an entry wins", the_later_verdict_wins)
+check("a stale or invalid verdict binds nothing and is counted",
+      a_row_that_binds_to_nothing_is_visible)
+check("a pairing verdict survives a corrected clock offset",
+      a_verdict_survives_a_corrected_clock)
+check("candidate exits are the free ones, same class first",
+      candidates_are_the_free_exits_same_class_first)
+check("the pair route records one verdict and refuses a malformed one",
+      the_pair_api_records_one_verdict)
+check("a frame comes back, or the gap is named", a_frame_comes_back_or_the_gap_is_named)
 
 
 def hostile_names_never_reach_the_filesystem():
