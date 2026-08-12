@@ -13,11 +13,12 @@ import shutil
 import sqlite3
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import calib
 
+CAT = timezone(timedelta(hours=2))     # Africa/Lusaka, fixed, no DST
 SEG_NAME = re.compile(r"^(\d{8}-\d{6})\.mkv$")     # FieldKit recorder wallclock segments
 RECROSS_S = 5.0            # media seconds a given obj may not re-cross the same line
 GAP_RESET_S = 30.0         # footage gap that drops tracker state: an id that survives the
@@ -45,7 +46,9 @@ def segment_epoch(name):
     m = SEG_NAME.match(Path(name).name)
     if not m:
         raise ValueError(f"segment {name!r} is not a FieldKit wallclock segment")
-    return datetime.strptime(m.group(1), "%Y%m%d-%H%M%S").timestamp()
+    # Filenames are Lusaka wallclock: anchor to CAT explicitly — a naive
+    # .timestamp() would use the host zone, shifting every event on a UTC box.
+    return datetime.strptime(m.group(1), "%Y%m%d-%H%M%S").replace(tzinfo=CAT).timestamp()
 
 
 def offsets(ingest_root, date, site):

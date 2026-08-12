@@ -188,7 +188,7 @@ def status():
         "active_job": next((f"{j['site']} {j['date']}" for j in JOBS.list()
                             if j["state"] == "RUNNING"), None),
         "offload": OFFLOAD.info(),
-        "time": datetime.now().isoformat(timespec="seconds"),
+        "time": datetime.now(aggregate.CAT).isoformat(timespec="seconds"),
     }
 
 

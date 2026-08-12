@@ -14,7 +14,7 @@ from pathlib import Path
 import calib
 import engine
 
-CAT = timezone(timedelta(hours=2))     # Africa/Lusaka, fixed, no DST
+CAT = engine.CAT                       # Africa/Lusaka, fixed, no DST — canonical in engine
 BIN_S = 900                            # 15 minutes
 PAIR_WINDOW = 120.0                    # max transit time entry -> exit
 SEG_S = 600                            # FieldKit segment length

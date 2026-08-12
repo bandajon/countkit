@@ -6,6 +6,7 @@ import os
 import sys
 import tempfile
 import time
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -150,8 +151,8 @@ def a_centroid_exactly_on_the_line():
 
 
 def epochs():
-    assert engine.segment_epoch(SEG) == time.mktime(time.strptime(
-        "20260804-070000", "%Y%m%d-%H%M%S"))
+    assert engine.segment_epoch(SEG) == datetime(
+        2026, 8, 4, 7, 0, tzinfo=engine.CAT).timestamp()
     try:
         engine.segment_epoch("nonsense.mkv")
         raise AssertionError("bad segment name accepted")
@@ -363,8 +364,8 @@ def build_gap(gap_s):
     (day / "cam1").mkdir(parents=True, exist_ok=True)
     (day / ".verified").touch()
     (day / "manifest.json").write_text(json.dumps({"time_offset_s": {"cam1": 0.0}}))
-    seg2 = time.strftime("%Y%m%d-%H%M%S.mkv",
-                         time.localtime(engine.segment_epoch(SEG) + 600 + gap_s))
+    seg2 = datetime.fromtimestamp(engine.segment_epoch(SEG) + 600 + gap_s,
+                                  engine.CAT).strftime("%Y%m%d-%H%M%S.mkv")
     fd = FIX / GAP_SITE / DATE
     fd.mkdir(parents=True, exist_ok=True)
     (fd / "segments.json").write_text(json.dumps({"cam1": [

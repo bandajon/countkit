@@ -62,14 +62,14 @@ def write(events):
 
 
 def segments(cam, epochs):
-    """Segment names are written back through the same host-timezone strftime that
-    engine.segment_epoch parses, so coverage lines up on a host in any timezone."""
+    """Segment names are Lusaka wallclock, formatted in CAT to match what
+    engine.segment_epoch parses — independent of the host timezone."""
     d = app.ingest_root() / DATE / SITE / cam
     d.mkdir(parents=True, exist_ok=True)
     for p in d.glob("*.mkv"):
         p.unlink()
     for e in epochs:
-        (d / datetime.fromtimestamp(e).strftime("%Y%m%d-%H%M%S.mkv")).write_bytes(b"")
+        (d / datetime.fromtimestamp(e, CAT).strftime("%Y%m%d-%H%M%S.mkv")).write_bytes(b"")
 
 
 def calibrate():
