@@ -21,7 +21,15 @@ PAIR_WINDOW = 120.0                    # max transit time entry -> exit
 # confidently and wrongly (live: one tuk-tuk matched to a van, then to a Hilux). When a
 # rival candidate's transit time is this close, tier 2 assigns NEITHER: the pairing rate
 # falls, and what is left is true. The cost is reported as qa.pairing.ambiguous.
-AMBIGUITY_S = 15.0
+#
+# 3 s, measured on two Lusaka junctions: two cameras timing the same crossing disagree by
+# more than a second, so a sub-3 s difference between rival candidates is inside the
+# noise and choosing between them is a coin toss. Wider is not safer — at 15 s the gate
+# swallowed 95% of Kalambo's movements, including ones the footage can distinguish
+# (kalambo paired 35%->4.6%, benbella 41%->5.4%; at 3 s: 14.6% and 23.6%). Ceiling: this
+# is a heuristic about a heuristic. The fix is tier 1 — one camera watching the whole
+# movement — which is a camera-aim and gate-placement job, not a constant.
+AMBIGUITY_S = 3.0
 SEG_S = 600                            # FieldKit segment length
 REFINE_SLACK = 120.0                   # how far a corrected clock offset may move a stamp
 OK_RATE = 85.0                         # combined pairing below this flags the site
