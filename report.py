@@ -212,6 +212,12 @@ def _excel(path, d, config):
     if _manual_note(d):
         rows += [("Manually paired", _manual(d)["paired"]),
                  ("Manually unpaired", _manual(d)["unpaired"])]
+    # Detected but absent from the vehicle tables — silence here would read as
+    # "nothing else was on the footage", which is the one thing it never means.
+    for k, n in sorted((qa.get("non_vehicle") or {}).items()):
+        rows.append((f"Non-vehicle detections excluded ({k})", n))
+    for k, n in sorted((qa.get("unmapped") or {}).items()):
+        rows.append((f"Unmapped detector label counted as unmapped ({k})", n))
     for cam, off in qa["offsets"].items():
         rows.append((f"Clock offset {cam} (s)", off))
     for cam, c in qa["coverage"]["per_cam"].items():

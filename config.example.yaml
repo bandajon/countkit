@@ -31,7 +31,7 @@ classes:
   # COCO labels, as emitted by a stock YOLO model (car/truck/motorcycle/bicycle
   # already appear above and need no second row):
   # - {model: bus, report: large_bus}
-  # - {model: person, report: pedestrian}
+  - {model: person, report: pedestrian}   # not a vehicle: counted, excluded from vehicle tables
 
 # Passenger-car-unit factors per report class, applied only when the PCU toggle is on.
 # Every report class the deliverable can name belongs here, including the refined ones

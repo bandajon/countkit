@@ -30,6 +30,14 @@ PAIR_WINDOW = 120.0                    # max transit time entry -> exit
 # is a heuristic about a heuristic. The fix is tier 1 — one camera watching the whole
 # movement — which is a camera-aim and gate-placement job, not a constant.
 AMBIGUITY_S = 3.0
+# Report classes that are NOT vehicles. Detected and counted, but kept out of every
+# vehicle table: the TOR asks for eight VEHICLE classes, so a pedestrian column would
+# make the class columns stop summing to the total. Tallied into qa.non_vehicle and
+# disclosed in the workbook — the same treatment 'unmapped' gets, for the same reason.
+# Not the same as PCU 0.0: a motorcycle is priced at 0.5 and is still a vehicle.
+# ponytail: a set literal, because the taxonomy names exactly one. A second non-vehicle
+# class (stray dogs, pushcarts) makes this a config list.
+NON_VEHICLE = {"pedestrian"}
 SEG_S = 600                            # FieldKit segment length
 REFINE_SLACK = 120.0                   # how far a corrected clock offset may move a stamp
 OK_RATE = 85.0                         # combined pairing below this flags the site
@@ -401,6 +409,17 @@ def counts(site, date, data_root, ingest_root, config):
     check_names(site, date)     # becomes filenames (DB, segdur cache) further down
     cmap = class_map(config)
     evs = load_events(data_root, site, date)
+    # Non-vehicles come out here, before pair() stamps the list indices that _move() hands
+    # back to callers — filtering downstream would leave those indices pointing at the
+    # wrong events. Counted, never dropped: the tally is disclosed in qa.non_vehicle.
+    non_vehicle, veh = {}, []
+    for e in evs:
+        rc = e.get("refined") or report_class(e["cls"], cmap)
+        if rc in NON_VEHICLE:
+            non_vehicle[rc] = non_vehicle.get(rc, 0) + 1
+        else:
+            veh.append(e)
+    evs = veh
     pair_stats = {}
     moves, leftovers = pair(evs, cmap, read_pair_rows(data_root, site, date)["rows"],
                             pair_stats)
@@ -505,6 +524,8 @@ def counts(site, date, data_root, ingest_root, config):
         "qa": {"pairing": qa_pairing,
                "coverage": cov,
                "unmapped": unmapped,
+               # Detected, excluded from every vehicle table, still on the record.
+               "non_vehicle": non_vehicle,
                # Keyed on the cameras that HAVE footage, so an unset offset shows up as
                # None. Keying on the offsets themselves can never report one missing.
                "offsets": {cam: offs.get(cam) for cam in cams},

@@ -858,6 +858,35 @@ def a_hostile_body_never_reaches_the_filesystem():
     assert not stray.exists(), "a hostile date wrote a manifest outside ingest_root"
 
 
+def pedestrians_are_counted_but_never_a_vehicle():
+    """A person crossing a gate is a detection, not a vehicle. It must leave the totals,
+    the per-arm class breakdown and the class list — and still be on the record in QA.
+
+    The live bug this pins: 'person' was unmapped, and an unmapped label is deliberately
+    counted as a vehicle ("a label this table does not name still moves"). Right for a
+    junk label, wrong for a pedestrian — it inflated a delivered client report by 274."""
+    write([("cam1", 1, "car", GE, "entry", ts("09:00")),
+           ("cam1", 2, "person", GE, "entry", ts("09:01")),
+           ("cam1", 3, "person", GE, "entry", ts("09:02")),
+           ("cam1", 4, "backpack", GE, "entry", ts("09:03"))])
+    r = run()                       # the shipped config maps person -> pedestrian
+    b = [x for x in r["bins"] if x["total"]][0]
+    # One car + one backpack: junk still counts (and surfaces in qa.unmapped), people do not.
+    assert b["total"] == 2, b["total"]
+    assert "pedestrian" not in b["arms"][GE]["classes"], b["arms"][GE]["classes"]
+    assert "pedestrian" not in r["classes"], r["classes"]
+    assert r["qa"]["non_vehicle"] == {"pedestrian": 2}, r["qa"]["non_vehicle"]
+    assert r["qa"]["unmapped"] == {"backpack": 1}, r["qa"]["unmapped"]
+    # Drop the mapping and the pre-fix behaviour returns: 'person' becomes an unmapped
+    # label, and an unmapped label counts. Pinned so the exclusion is shown to come from
+    # the class map, not from something coincidental about the label 'person'.
+    bare = {**app.CONFIG, "classes": [c for c in app.CONFIG["classes"]
+                                      if c.get("model") != "person"]}
+    assert [x for x in run(bare)["bins"] if x["total"]][0]["total"] == 4
+
+
+check("pedestrians are counted but never a vehicle",
+      pedestrians_are_counted_but_never_a_vehicle)
 check("hostile site/date names never reach the filesystem",
       hostile_names_never_reach_the_filesystem)
 check("a hostile body date is refused by queue and offsets",
