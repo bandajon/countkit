@@ -136,3 +136,17 @@ corridor:
 branding:
   company_name: Dexterity
   logo_path: ""
+
+# Local vision-model batches (Counts -> queue kinds vlm / vlmpair). LOCAL endpoints
+# only: evidence crops carry readable plates — Zambia DPA internal QA material that
+# never goes to a hosted API. Absent or empty = the feature is off everywhere.
+# endpoints takes a list to shard one batch across several machines' servers.
+# vlm:
+#   endpoint: http://localhost:11434      # Ollama; or endpoints: [url, url]
+#   model: gemma4:12b                     # e2b/e4b have an open image-input bug
+
+# Vehicle re-ID embeddings (queue kind emb): an ONNX model trained for vehicle
+# re-identification (VeRi-776 class). Threshold and margin are CALIBRATED from each
+# site-day's own tracker labels at batch time, never configured.
+# emb:
+#   model_path: ./data/models/veri-r50.onnx

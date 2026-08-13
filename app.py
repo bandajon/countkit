@@ -141,7 +141,32 @@ def detector():
     return deepstream_runner.factory(ingest_root(), cfg)
 
 
-def run_job(site, date, say, cancelled):
+# One queue for every kind of work: the single worker thread is the mutual exclusion
+# that keeps a VLM batch from running beside an analysis on an 8GB Jetson.
+JOB_KINDS = {"analyze", "vlm", "plate", "emb", "vlmpair"}
+
+
+def run_job(site, date, say, cancelled, kind="analyze"):
+    if kind == "vlm":
+        import vlm_batch
+        return vlm_batch.run(site, date, data_root(), CONFIG,
+                             progress=say, cancelled=cancelled)
+    if kind == "plate":
+        import plate_batch
+        return plate_batch.run(site, date, data_root(), CONFIG,
+                               progress=say, cancelled=cancelled)
+    if kind == "emb":
+        import emb_batch
+        return emb_batch.run(site, date, data_root(), CONFIG,
+                             progress=say, cancelled=cancelled)
+    if kind == "vlmpair":
+        import vlm_pair_batch
+        return vlm_pair_batch.run(site, date, data_root(), CONFIG,
+                                  progress=say, cancelled=cancelled)
+    if kind != "analyze":
+        # A jobs.json edited by hand, or a kind from a newer version: fail the job
+        # loudly rather than analyze under a label that promised something else.
+        raise ValueError(f"unknown job kind {kind!r}")
     return engine.analyze(site, date, ingest_root(), data_root(), detector(),
                           progress=say, cancelled=cancelled)
 
@@ -230,7 +255,8 @@ def config_post(body: dict = Body(default={})):
         raise HTTPException(400, "config must be a mapping of keys")
     if cfg.get("classes") is not None and not isinstance(cfg["classes"], list):
         raise HTTPException(400, "'classes' must be a list if present")
-    for k in ("pcu", "probe", "r2", "google_routes", "branding", "corridor"):
+    for k in ("pcu", "probe", "r2", "google_routes", "branding", "corridor",
+              "vlm", "emb"):
         if cfg.get(k) is not None and not isinstance(cfg[k], dict):
             raise HTTPException(400, f"'{k}' must be a mapping if present")
     # Blanking one of these used to save fine and then 500 every route — and take the
@@ -261,6 +287,19 @@ def _calib(fn, *a):
 @app.get("/api/calib/{site}/armmap")
 def calib_armmap(site: str):
     return _calib(calib.arm_map, site)
+
+
+@app.get("/api/advisor/{site}/{cam}")
+def advisor_get(site: str, cam: str):
+    """The gate advisor's standing proposal, or 404 copy telling the operator how to
+    make one. Loads into the Label tab as a DRAFT — saving it is the operator's call."""
+    import gate_advisor
+    p = _calib(gate_advisor.advisor_path, data_root(), site, cam)
+    if not p.exists():
+        raise HTTPException(404, f"no advisor proposal for {site}/{cam} yet — run "
+                                 f"gate_advisor.py {site} <date> {cam} after an "
+                                 "analysis, then reload")
+    return json.loads(p.read_text())
 
 
 @app.get("/api/calib/{site}/{cam}/versions")
@@ -317,11 +356,27 @@ def analyze_jobs():
 @app.post("/api/analyze/queue")
 def analyze_queue(body: dict = Body(default={})):
     site, date = body.get("site") or "", body.get("date") or ""
+    kind = body.get("kind") or "analyze"
+    if kind not in JOB_KINDS:
+        raise HTTPException(400, f"unknown job kind {kind!r} — one of: "
+                                 f"{', '.join(sorted(JOB_KINDS))}")
     try:
-        engine.check_ready(ingest_root(), date, site)   # .verified + every clock offset
+        if kind == "analyze":
+            engine.check_ready(ingest_root(), date, site)   # .verified + clock offsets
+        else:
+            # Batch kinds read the events a finished analysis wrote — footage and
+            # offsets are irrelevant, but an unanalyzed site-day has nothing to walk.
+            aggregate.check_names(site, date)
+            db = engine.connect(data_root(), site)
+            n = db.execute("SELECT COUNT(*) FROM events WHERE site=? AND date=?",
+                           (site, date)).fetchone()[0]
+            db.close()
+            if not n:
+                raise ValueError(f"{site} {date}: nothing analyzed — run it in "
+                                 "Analyze first")
     except ValueError as e:
         raise HTTPException(400, str(e))
-    return JOBS.add(site, date)
+    return JOBS.add(site, date, kind)
 
 
 @app.post("/api/analyze/cancel")

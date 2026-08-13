@@ -4,9 +4,11 @@
 Read-only over the events table. Nothing here may edit a count — QA flags are the
 remedy for bad data, because a hand-edited number destroys the warranty argument."""
 
+import base64
 import csv
 import json
 import statistics
+import struct
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -42,6 +44,10 @@ SEG_S = 600                            # FieldKit segment length
 REFINE_SLACK = 120.0                   # how far a corrected clock offset may move a stamp
 OK_RATE = 85.0                         # combined pairing below this flags the site
 MAX_INFERRED = 30.0                    # inferred share of paired above this warns
+# ponytail: module constant like AMBIGUITY_S, not config — retune by editing, and the
+# OCR confidence scale is model-specific anyway. Below this a read is treated as no read.
+PLATE_MIN_CONF = 0.75
+AMBIG_PAIR_CAP = 500      # refused contests handed to the tie-break batch, at most
 
 
 def bin_start(ts):
@@ -84,6 +90,8 @@ def load_events(data_root, site, date):
     # verbatim, so "North " and "North" would fork one arm into two columns.
     evs = [dict(zip(cols, r), line=(r[3] or "").strip()) for r in rows]
     _apply_refinements(evs, _refine_index(data_root, site, date))
+    _apply_plates(evs, data_root, site, date)
+    _apply_embs(evs, data_root, site, date)
     return evs
 
 
@@ -178,9 +186,35 @@ def pair(evs, cmap, overrides=None, stats=None):
             used |= {en["i"], ex["i"]}
             moves.append(_move(en, ex, 1))
 
+    # Plate-confirmed (tier 3): both crossings read a licence plate and the strings
+    # match within one OCR slip. Evidence, not inference — but it binds ONLY when the
+    # match is one-to-one among the free candidates: a plate string in reach of two
+    # counterparts is AMBIGUITY_S philosophy again (ABC123 vs ABC128 at distance 1 is
+    # exactly the confident wrong match the gates exist to stop). Class is deliberately
+    # NOT required to agree: the plate outranks the detector, and a one-sided
+    # refinement must not unpair hard evidence.
+    free = lambda e: e["i"] not in used and e["i"] not in held
+    pcands = []
+    for en in [e for e in evs if e["kind"] == "entry" and free(e) and e.get("plate")]:
+        for ex in [e for e in evs if e["kind"] == "exit" and free(e) and e.get("plate")]:
+            dt = ex["ts"] - en["ts"]
+            if (0 < dt <= PAIR_WINDOW and en["cam"] != ex["cam"]
+                    and en["line"].strip().lower() != ex["line"].strip().lower()
+                    and _plate_dist_ok(en["plate"], ex["plate"])):
+                pcands.append((en, ex))
+    deg_en, deg_ex = {}, {}
+    for en, ex in pcands:
+        deg_en[en["i"]] = deg_en.get(en["i"], 0) + 1
+        deg_ex[ex["i"]] = deg_ex.get(ex["i"], 0) + 1
+    plate_pairs = 0
+    for en, ex in pcands:
+        if deg_en[en["i"]] == 1 and deg_ex[ex["i"]] == 1:
+            used |= {en["i"], ex["i"]}
+            moves.append(_move(en, ex, 3))
+            plate_pairs += 1
+
     # ponytail: O(entries x exits) candidate scan. A site-day is thousands of events,
     # not millions; bucket by bin if a wave ever outgrows it.
-    free = lambda e: e["i"] not in used and e["i"] not in held
     cands = []
     for en in [e for e in evs if e["kind"] == "entry" and free(e)]:
         for ex in [e for e in evs if e["kind"] == "exit" and free(e)]:
@@ -196,7 +230,7 @@ def pair(evs, cmap, overrides=None, stats=None):
     for c in cands:
         by_en.setdefault(c[1], []).append(c)
         by_ex.setdefault(c[2], []).append(c)
-    blocked, ambiguous = set(), set()
+    blocked, ambiguous, emb_pairs, amb_pairs = set(), set(), 0, []
     for dt, i, j, en, ex in sorted(cands, key=lambda c: (c[0], c[1], c[2])):
         if i in used or j in used or i in blocked or j in blocked:
             continue
@@ -206,9 +240,47 @@ def pair(evs, cmap, overrides=None, stats=None):
                   if (c[1], c[2]) != (i, j) and abs(c[0] - dt) <= AMBIGUITY_S
                   and not {c[1], c[2]} & (used | blocked)]
         if rivals:
+            # Visual tie-break (tier 4): transit times cannot separate this contest,
+            # but a calibrated re-ID embedding sometimes can. The whole contest is
+            # judged, not just the dt-first candidate — the best-matching member wins
+            # only if it clears the site-day's threshold AND beats every member it
+            # CONFLICTS with (shares an end) by the calibrated margin. Two disjoint
+            # true pairs in one contest must not veto each other, and a conflicting
+            # member with no vector cannot be ruled out, so it holds the gate.
+            contest = [(dt, i, j, en, ex)] + rivals
+            scored = [(c, _emb_cos(c[3], c[4])) for c in contest]
+            best, bcos = max(scored, key=lambda s: -1.0 if s[1] is None else s[1])
+            if bcos is not None and bcos >= best[3]["emb_thr"]:
+                # The margin universe is the WINNER's own rival set, drawn from the
+                # global candidate index — not the anchor's contest, which is not
+                # closed under the shares-an-end relation. Reviewed live: an
+                # out-of-contest rival 2.5 s from the winner, cosine-identical,
+                # would otherwise never be consulted and a coin flip would export
+                # as a calibrated visual separation.
+                clash = [_emb_cos(c[3], c[4])
+                         for c in by_en.get(best[1], []) + by_ex.get(best[2], [])
+                         if (c[1], c[2]) != (best[1], best[2])
+                         and abs(c[0] - best[0]) <= AMBIGUITY_S
+                         and not {c[1], c[2]} & (used | blocked)]
+                if all(s is not None and bcos - s >= best[3]["emb_margin"]
+                       for s in clash):
+                    # Everyone else stays free, exactly like the plate tier: this
+                    # verdict may unlock their own contests later in the scan.
+                    used |= {best[1], best[2]}
+                    moves.append(_move(best[3], best[4], 4))
+                    emb_pairs += 1
+                    continue
             # Everything in the contest stays unpaired: leaving the losing entry free to
             # take some other exit is exactly the confident wrong match this gate exists
-            # to stop.
+            # to stop. The refused candidates are kept (capped) for the tie-break
+            # batch — without this the gate discards exactly what a later reviewer or
+            # suggestion pass would need to look at.
+            if len(amb_pairs) < AMBIG_PAIR_CAP:
+                keep = lambda e: {"cam": e["cam"], "obj_id": e["obj_id"],
+                                  "line": e["line"], "kind": e["kind"], "ts": e["ts"],
+                                  "crop": e["crop"]}
+                for c in [(dt, i, j, en, ex)] + rivals:
+                    amb_pairs.append({"entry": keep(c[3]), "exit": keep(c[4])})
             blocked |= {i, j} | {c[1] for c in rivals} | {c[2] for c in rivals}
             ambiguous |= {i} | {c[1] for c in rivals}
             continue
@@ -216,7 +288,12 @@ def pair(evs, cmap, overrides=None, stats=None):
         moves.append(_move(en, ex, 2))
 
     if stats is not None:
-        stats.update(ambiguous=len(ambiguous), manual=manual_qa)
+        stats.update(ambiguous=len(ambiguous), manual=manual_qa,
+                     plate_resolved=sum(1 for e in evs if e.get("plate")),
+                     plate_pairs=plate_pairs,
+                     emb_resolved=sum(1 for e in evs if e.get("emb") is not None),
+                     emb_pairs=emb_pairs,
+                     ambiguous_pairs=amb_pairs)
     return moves, [e for e in evs if e["i"] not in used]
 
 
@@ -224,12 +301,18 @@ def pairing_qa(evs, moves, stats=None):
     entries = [e for e in evs if e["kind"] == "entry"]
     total = len(entries)
     # Tier 0 is a human on the footage — better evidence than a shared tracker id, so it
-    # folds in with tier 1 rather than being priced as inference.
+    # folds in with tier 1 rather than being priced as inference. Tier 3 is a matched
+    # plate: evidence too, but cross-camera — its own bucket, never priced as inference.
     t1 = sum(1 for m in moves if m["tier"] in (0, 1))
     t2 = sum(1 for m in moves if m["tier"] == 2)
+    t3 = sum(1 for m in moves if m["tier"] == 3)
+    # Tier 4 is a calibrated visual separation — stronger than time alone, weaker than
+    # a plate or a tracker. It counts as paired AND as inference: pricing it as
+    # evidence would let an embedding quietly launder certainty.
+    t4 = sum(1 for m in moves if m["tier"] == 4)
     pct = lambda n: round(n / total * 100, 1) if total else 0.0
-    paired = t1 + t2
-    inferred_share = round(t2 / paired * 100, 1) if paired else 0.0
+    paired = t1 + t2 + t3 + t4
+    inferred_share = round((t2 + t4) / paired * 100, 1) if paired else 0.0
     rate = pct(paired)
     per_cam = {}
     for cam in sorted({e["cam"] for e in entries}):
@@ -237,7 +320,7 @@ def pairing_qa(evs, moves, stats=None):
         p = sum(1 for m in moves if m["entry_cam"] == cam)
         per_cam[cam] = {"entries": n, "paired": p,
                         "rate": round(p / n * 100, 1) if n else 0.0}
-    return {"rate": rate, "same": pct(t1), "inferred": pct(t2),
+    return {"rate": rate, "same": pct(t1), "inferred": pct(t2 + t4),
             "inferred_share": inferred_share, "entries": total, "paired": paired,
             "state": "bad" if rate < OK_RATE else
                      "warn" if inferred_share > MAX_INFERRED else "ok",
@@ -247,6 +330,14 @@ def pairing_qa(evs, moves, stats=None):
             # gone the same way a stale refinement is.
             "ambiguous": (stats or {}).get("ambiguous", 0),
             "manual": (stats or {}).get("manual", {"paired": 0, "unpaired": 0, "stale": 0}),
+            # reads is filled by counts() from the sidecar: a plate file whose rows all
+            # went stale must show reads>0, resolved=0 — not silently vanish.
+            "plate": {"reads": 0,
+                      "resolved": (stats or {}).get("plate_resolved", 0),
+                      "pairs": (stats or {}).get("plate_pairs", 0)},
+            "emb": {"reads": 0,
+                    "resolved": (stats or {}).get("emb_resolved", 0),
+                    "pairs": (stats or {}).get("emb_pairs", 0)},
             "flagged": 0}      # the verification drawer writes flags here
 
 
@@ -474,7 +565,10 @@ def counts(site, date, data_root, ingest_root, config):
                               "bin": m["bin"], "bin_start": bin_iso(m["bin"]),
                               "count": 0, "tier2_count": 0})
         c["count"] += 1
-        if m["tier"] == 2:
+        # tier >= 2 is every cross-camera tier. Per cell, a plate pair wears the weaker
+        # "inferred" label rather than growing its own column through four grids and a
+        # PDF — conservative, never overstates; the split is disclosed in Method + QA.
+        if m["tier"] >= 2:
             c["tier2_count"] += 1
 
     unmapped = {}
@@ -498,6 +592,10 @@ def counts(site, date, data_root, ingest_root, config):
 
     qa_pairing = pairing_qa(evs, moves, pair_stats)
     qa_pairing["flagged"] = read_flags(data_root, site, date)["count"]
+    qa_pairing["plate"]["reads"] = read_plates(data_root, site, date)["count"]
+    p = emb_path(data_root, site, date)
+    qa_pairing["emb"]["reads"] = max(0, sum(
+        1 for l in p.read_text().splitlines() if l.strip()) - 1) if p.exists() else 0
 
     cams = engine.site_day_cams(ingest_root, date, site)
     offs = engine.offsets(ingest_root, date, site)
@@ -519,6 +617,8 @@ def counts(site, date, data_root, ingest_root, config):
         "movements": {"od": sorted(od.values(), key=lambda c: (c["bin"], c["entry"])),
                       "tier1": sum(1 for m in moves if m["tier"] == 1),
                       "tier2": sum(1 for m in moves if m["tier"] == 2),
+                      "tier3": sum(1 for m in moves if m["tier"] == 3),
+                      "tier4": sum(1 for m in moves if m["tier"] == 4),
                       "unpaired": len(leftovers)},
         "peaks": {"am": _peak(totals, starts, True), "pm": _peak(totals, starts, False)},
         "qa": {"pairing": qa_pairing,
@@ -534,6 +634,11 @@ def counts(site, date, data_root, ingest_root, config):
                # together, so counting both would report twice the review that happened.
                "refined": sum(1 for e in evs
                               if e["kind"] == "entry" and e.get("refined")),
+               # Ledger rows carrying model provenance — the Method sheet's wording
+               # must say "confirmed", not "reviewed", when these exist.
+               "refined_assisted": sum(1 for r in
+                                       read_refinements(data_root, site, date)["rows"]
+                                       if r.get("src")),
                # And the review that evaporated — refinements matching no event at all,
                # which is paid human work gone. Silence here is the failure mode.
                "refined_stale": max(0, len(_refine_index(data_root, site, date))
@@ -619,6 +724,12 @@ def add_refinements(data_root, site, date, rows):
                 "cam": r.get("cam"), "obj_id": r.get("obj_id"),
                 "line": (r.get("line") or "").strip(),   # events are stripped on load
                 "kind": r.get("kind"), "ts": r.get("ts"), "to": r.get("to"),
+                # Provenance: "vlm:<model>" when the reviewer confirmed a machine
+                # proposal, absent when the call was unassisted. Without this a
+                # confirmed proposal is audit-indistinguishable from a human's own
+                # judgment — and the Method sheet must not claim review that was
+                # really confirmation.
+                **({"src": r["src"]} if r.get("src") else {}),
                 "at": datetime.now(CAT).isoformat(timespec="seconds")}) + "\n")
 
 
@@ -686,6 +797,96 @@ def _apply_refinements(evs, idx):
         e["refined"] = idx[k]     # the detector's own cls stays put; this is an overlay
 
 
+# ---------------------------------------------------------------- plate reads
+
+def plate_path(data_root, site, date):
+    return _sidecar(data_root, "plate", site, date)
+
+
+def read_plates(data_root, site, date):
+    p = plate_path(data_root, site, date)
+    rows = []
+    if p.exists():
+        rows = [json.loads(l) for l in p.read_text().splitlines() if l.strip()]
+    return {"count": len(rows), "rows": rows}
+
+
+def _apply_plates(evs, data_root, site, date):
+    """Attach plate reads to their events, same slack contract as refinements. The
+    strings never travel further: _move, refine_events and pair_candidates all copy
+    explicit field lists, so a plate reaches pair() and nothing the API serves —
+    it is DPA personal data, internal like the crop it came from."""
+    keyed = {}
+    for r in read_plates(data_root, site, date)["rows"]:
+        k = _event_key(r)
+        if k and r.get("plate") and float(r.get("conf") or 0) >= PLATE_MIN_CONF:
+            keyed[k] = r["plate"]
+    for k, e in _resolve_keys(evs, list(keyed)).items():
+        e["plate"] = keyed[k]
+
+
+# ---------------------------------------------------------------- re-ID embeddings
+
+def emb_path(data_root, site, date):
+    return _sidecar(data_root, "emb", site, date)
+
+
+def _apply_embs(evs, data_root, site, date):
+    """Attach re-ID vectors and the site-day's CALIBRATED threshold/margin to events.
+    Same slack contract as refinements. Vectors are unpacked lazily-ish (all at once,
+    but pure stdlib): base64 float16, L2-normalized at write time."""
+    p = emb_path(data_root, site, date)
+    if not p.exists():
+        return
+    lines = [l for l in p.read_text().splitlines() if l.strip()]
+    if not lines:
+        return
+    try:
+        meta = json.loads(lines[0]).get("meta") or {}
+    except ValueError:
+        return
+    thr, margin = meta.get("threshold"), meta.get("margin")
+    if thr is None or margin is None:
+        return                          # uncalibrated file binds nothing
+    keyed = {}
+    for l in lines[1:]:
+        try:
+            r = json.loads(l)
+            k = _event_key(r)
+            if k and r.get("v"):
+                blob = base64.b64decode(r["v"])
+                keyed[k] = struct.unpack(f"<{len(blob) // 2}e", blob)
+        except (ValueError, struct.error):
+            continue
+    for k, e in _resolve_keys(evs, list(keyed)).items():
+        e["emb"], e["emb_thr"], e["emb_margin"] = keyed[k], thr, margin
+
+
+def _emb_cos(en, ex):
+    """Cosine between two events' vectors, or None when either end is missing one —
+    and None must hold the gate: an unseen rival cannot be ruled out visually."""
+    a, b = en.get("emb"), ex.get("emb")
+    if a is None or b is None or len(a) != len(b):
+        return None
+    return sum(x * y for x, y in zip(a, b))
+
+
+def _plate_dist_ok(a, b):
+    """Edit distance <= 1 without an O(n*m) table: equal, or equal length with one
+    substitution, or off-by-one length with one insertion."""
+    if a == b:
+        return True
+    if len(a) == len(b):
+        return sum(x != y for x, y in zip(a, b)) == 1
+    if abs(len(a) - len(b)) != 1:
+        return False
+    long, short = (a, b) if len(a) > len(b) else (b, a)
+    for i in range(len(long)):
+        if long[:i] + long[i + 1:] == short:
+            return True
+    return False
+
+
 # ---------------------------------------------------------------- manual pairing
 
 def pair_path(data_root, site, date):
@@ -738,12 +939,43 @@ def _pair_index(rows):
     return idx
 
 
+def vlmpair_path(data_root, site, date):
+    return _sidecar(data_root, "vlmpair", site, date)
+
+
+def read_vlmpair(data_root, site, date):
+    p = vlmpair_path(data_root, site, date)
+    rows = []
+    if p.exists():
+        rows = [json.loads(l) for l in p.read_text().splitlines() if l.strip()]
+    return {"count": len(rows), "rows": rows}
+
+
+def _suggestions(evs, data_root, site, date):
+    """{entry index: {exit index: detail}} for the model's agreed 'same' verdicts.
+    Suggestions ANNOTATE the Find-exit list; only the reviewer's Pair click ever
+    writes a verdict that pairs anything."""
+    rows = [r for r in read_vlmpair(data_root, site, date)["rows"]
+            if r.get("verdict") == "same"]
+    ekeys = [k for r in rows if (k := _event_key(r.get("entry")))]
+    xkeys = [k for r in rows if (k := _event_key(r.get("exit")))]
+    got = _resolve_keys(evs, list(set(ekeys) | set(xkeys)))
+    out = {}
+    for r in rows:
+        en = got.get(_event_key(r.get("entry")))
+        ex = got.get(_event_key(r.get("exit")))
+        if en is not None and ex is not None:
+            out.setdefault(en["i"], {})[ex["i"]] = r.get("detail") or ""
+    return out
+
+
 def pair_candidates(site, date, data_root, config, cam, obj_id, line, kind, ts,
                     limit=30):
     """The exits a reviewer could attach to one entry: still unpaired, inside
     PAIR_WINDOW, same report class ahead of the rest — the Find-exit list. Sorted by
     class before transit time, because the gate now leaves the near-miss cases unpaired
-    and the right exit is often not the closest one."""
+    and the right exit is often not the closest one. A model's 'same vehicle'
+    suggestion outranks both — it is a hint to the eye, badged as such, never a pair."""
     evs = load_events(data_root, site, date)
     _, leftovers = pair(evs, class_map(config), read_pair_rows(data_root, site, date)["rows"])
     k = _event_key({"cam": cam, "obj_id": obj_id, "line": line, "kind": kind, "ts": ts})
@@ -751,13 +983,18 @@ def pair_candidates(site, date, data_root, config, cam, obj_id, line, kind, ts,
     if en is None or en["kind"] != "entry":
         raise LookupError("that entry is not in this analysis any more — re-open the "
                           "movement list and pick the row again")
+    sugg = _suggestions(evs, data_root, site, date).get(en["i"], {})
     free = {e["i"] for e in leftovers}
+    # The boolean only. The model's cited detail frequently IS a plate fragment (the
+    # prompt asks for the most discriminative feature), and a plate string reaches
+    # nothing the API serves — the detail stays in the sidecar for internal audit.
     out = [{**{f: e[f] for f in ("cam", "obj_id", "line", "kind", "ts", "crop")},
             "rc": e["rc"], "dt": round(e["ts"] - en["ts"], 2),
+            "suggested": e["i"] in sugg,
             "clock": datetime.fromtimestamp(e["ts"], CAT).strftime("%H:%M:%S")}
            for e in evs if e["kind"] == "exit" and e["i"] in free
            and 0 < e["ts"] - en["ts"] <= PAIR_WINDOW]
-    out.sort(key=lambda c: (c["rc"] != en["rc"], c["dt"]))
+    out.sort(key=lambda c: (not c["suggested"], c["rc"] != en["rc"], c["dt"]))
     return {"total": len(out), "rc": en["rc"],
             "entry_clock": datetime.fromtimestamp(en["ts"], CAT).strftime("%H:%M:%S"),
             "candidates": out[:limit]}
@@ -802,6 +1039,33 @@ def refine_targets(config):
     return sorted(set(config.get("pcu") or {}) | set(class_map(config).values()))
 
 
+def vlm_path(data_root, site, date):
+    return _sidecar(data_root, "vlm", site, date)
+
+
+def read_vlm(data_root, site, date):
+    p = vlm_path(data_root, site, date)
+    rows = []
+    if p.exists():
+        rows = [json.loads(l) for l in p.read_text().splitlines() if l.strip()]
+    return {"count": len(rows), "rows": rows}
+
+
+def _vlm_index(evs, data_root, site, date):
+    """{event index: (proposed class, model)} — resolved with the same slack as
+    refinements, so a corrected clock offset does not orphan a batch. Rows a
+    re-analysis orphaned just drop out: the sidecar is a cheap regenerable cache,
+    so there is no analog of refined_stale (that alarm exists because refinements
+    are paid human work)."""
+    keyed = {}
+    for r in read_vlm(data_root, site, date)["rows"]:
+        k = _event_key(r)
+        if k:
+            keyed[k] = (r.get("proposed"), r.get("model", ""))
+    return {e["i"]: keyed[k]
+            for k, e in _resolve_keys(evs, list(keyed)).items()}
+
+
 def refine_events(site, date, data_root, config, cls=None, limit=30, offset=0):
     """Entry events for the reviewer, each with the exit its movement pairs to. The UI
     saves a refinement for BOTH ends at once: tier 2 pairs on class, so refining only
@@ -809,16 +1073,29 @@ def refine_events(site, date, data_root, config, cls=None, limit=30, offset=0):
     evs = load_events(data_root, site, date)
     moves, _ = pair(evs, class_map(config), read_pair_rows(data_root, site, date)["rows"])
     by_entry = {m["entry_i"]: m for m in moves}      # a movement is named by its entry
+    # Model proposals annotate the queue; only a target class may ever be suggested —
+    # a sidecar from an older config must not offer a button the API would refuse.
+    targets = set(refine_targets(config))
+    vlm = {i: pm for i, pm in _vlm_index(evs, data_root, site, date).items()
+           if pm[0] in targets}
     ends = lambda e: {k: e[k] for k in ("cam", "obj_id", "line", "kind", "ts", "crop")}
-    out = []
+    out, proposed_n = [], 0
     for e in evs:                                    # load_events is already ts-ordered
-        if e["kind"] != "entry" or (cls and e["rc"] != cls):
+        if e["kind"] != "entry":
             continue
-        m = by_entry.get(e["i"])
-        out.append({**ends(e), "cls": e["cls"], "rc": e["rc"],
-                    "refined": bool(e.get("refined")),
-                    "paired": ends(evs[m["exit_i"]]) if m else None})
-    return {"total": len(out), "events": out[offset:offset + limit]}
+        p = vlm.get(e["i"])
+        if not (cls and e["rc"] != cls):
+            out.append({**ends(e), "cls": e["cls"], "rc": e["rc"],
+                        "refined": bool(e.get("refined")),
+                        "proposed": p[0] if p else None,
+                        "proposed_by": p[1] if p else None,
+                        "paired": ends(evs[m["exit_i"]])
+                        if (m := by_entry.get(e["i"])) else None})
+        proposed_n += bool(p)
+    return {"total": len(out), "events": out[offset:offset + limit],
+            # Coverage for the panel chip: silence must never read as "no proposals
+            # needed" — n of ALL entries, not of the filtered page.
+            "proposed_total": proposed_n}
 
 
 def apply_pcu(classes, factors):

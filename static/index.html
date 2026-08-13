@@ -180,6 +180,8 @@
   .seg .btn:first-child { border-radius:4px 0 0 4px; margin-left:0; }
   .seg .btn:last-child { border-radius:0 4px 4px 0; }
   .seg .btn.on { background:var(--fg); border-color:var(--fg); color:var(--bg); }
+  /* a model's suggestion: visibly marked, deliberately weaker than a human's .on */
+  .seg .btn.sg { border-color:var(--warn); border-style:dashed; }
 
   .mv { display:flex; flex-wrap:wrap; gap:12px; align-items:center;
         padding:10px 0; border-top:1px solid var(--line); }
@@ -240,6 +242,7 @@
       </div>
       <div class="row" style="margin-top:10px">
         <span class="eyebrow grow" id="l-verinfo">no calibration yet</span>
+        <button class="btn" id="l-advisor">Load advisor proposal</button>
         <button class="btn" id="l-activate" hidden>Activate this version</button>
         <button class="btn go" id="l-save">Save as new version</button>
       </div>
@@ -874,6 +877,26 @@ $('l-activate').onclick = async () => {
   if (r.ok) { $('l-ver').value = ''; await $('l-ver').onchange(); await versions(); await armmap(); }
 };
 
+// The advisor's proposal becomes the working DRAFT — visibly dirty, fully editable,
+// and saved (or abandoned) through the same buttons as hand-drawn work. Nothing is
+// activated by loading it.
+$('l-advisor').onclick = async () => {
+  const r = await fetch(`/api/advisor/${LAB.site}/${LAB.cam}`);
+  $('l-res').className = 'res ' + (r.ok ? 'good' : 'bad');
+  if (!r.ok) { $('l-res').textContent = await detail(r); return; }
+  const a = await r.json();
+  LAB.work = a.proposal;
+  LAB.dirty = true;
+  LAB.sel = -1; LAB.draw = null;
+  const c = a.critique;
+  $('l-res').textContent = `advisor proposal loaded (${(a.stats.proposed || []).length}`
+    + ` gate${(a.stats.proposed || []).length === 1 ? '' : 's'} re-drawn, `
+    + `${a.stats.tracks} tracks measured, ${a.stats.edge_death_pct}% died at frame edge)`
+    + (c && c.assessment ? ` — model: ${c.assessment}` : '')
+    + ' · review the lines, then Save as new version';
+  drawbar(); gatelist(); paint();
+};
+
 $('l-save').onclick = async () => {
   const r = await fetch(`/api/calib/${LAB.site}/${LAB.cam}`,
     { method: 'POST', headers: { 'content-type': 'application/json' },
@@ -982,8 +1005,12 @@ function jobCard(j) {
       + `<div class="res mono">segment ${p.i || 0}/${p.n || '?'} · ${p.cam || '—'}`
       + ` · ${p.pct || 0}% · events ${p.events || 0}</div>`;
   } else if (j.state === 'DONE') {
-    body = `<div class="res good">${r.events || 0} events · ${r.crops || 0} crops`
-      + `${r.dropped ? ' · ' + r.dropped + ' dropped' : ''}</div>`
+    // A batch job's result speaks its own vocabulary — "0 events · 0 crops" on a
+    // finished VLM pass would read as an analysis that found nothing.
+    body = `<div class="res good">${(j.kind || 'analyze') === 'analyze'
+        ? `${r.events || 0} events · ${r.crops || 0} crops`
+          + `${r.dropped ? ' · ' + r.dropped + ' dropped' : ''}`
+        : `${r.proposed || 0} proposals · ${r.skipped || 0} skipped`}</div>`
       + `<a class="btn" href="#/counts" style="margin-top:8px">Review counts →</a>`;
   } else if (j.state === 'FAILED') {
     body = `<div class="res bad">${(j.log || []).slice(-5).join('\n')}</div>`
@@ -991,7 +1018,8 @@ function jobCard(j) {
   }
   d.innerHTML = `<div class="row"><span class="state ${dot}">${j.state}`
     + `${j.state === 'QUEUED' ? ' #' + j.queuePos : ''}</span>`
-    + `<span class="grow mono">${j.site} · ${j.date}</span></div>${body}`
+    + `<span class="grow mono">${j.site} · ${j.date}`
+    + `${(j.kind || 'analyze') !== 'analyze' ? ' · ' + esc(j.kind) : ''}</span></div>${body}`
     + `<details><summary>log</summary><div class="well">`
     + `${(j.log || []).join('\n') || 'nothing logged yet'}</div></details>`;
   const acts = document.createElement('div');
@@ -1059,7 +1087,11 @@ const CNT = {site: '', date: '', data: null, cls: '', pcu: false, period: 'day',
 // Per-approach accents live only in charts and table headers — never on chrome.
 const ACCENT = ['#86a8cf', '#cfa886', '#9ac2a8', '#c791b5'];
 const accent = i => ACCENT[i % ACCENT.length];
-const esc = s => String(s).replace(/</g, '&lt;');
+// Attribute-safe, not just text-node-safe: interpolated strings now include model
+// output and land inside quoted attributes, where an unescaped quote is a live
+// event-handler injection into the operator console.
+const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+                          .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
 // One place decides what a cell is worth: the class filter and the PCU toggle.
 function val(classes) {
@@ -1233,7 +1265,11 @@ function refineRows(staged) {
   const rows = [];
   for (const {ev, to} of staged.values())
     for (const x of [ev, ev.paired]) if (x)
-      rows.push({cam: x.cam, obj_id: x.obj_id, line: x.line, kind: x.kind, ts: x.ts, to});
+      rows.push({cam: x.cam, obj_id: x.obj_id, line: x.line, kind: x.kind, ts: x.ts, to,
+                 // Provenance rides only when the reviewer confirmed the model's own
+                 // suggestion; picking any other class is unassisted human judgment.
+                 ...(ev.proposed && to === ev.proposed && ev.proposed_by
+                     ? {src: 'vlm:' + ev.proposed_by} : {})});
   return rows;
 }
 
@@ -1273,9 +1309,12 @@ async function refineGrid() {
     + `?cls=${encodeURIComponent(RF.cls)}&limit=30&offset=${RF.off}`);
   if (!r.ok) { box.innerHTML = ''; refineRes('bad', `evidence unavailable — ${await detail(r)}`); return; }
   const d = await r.json();
-  $('rf-count').textContent = d.total
+  // Coverage stated, never implied: an entry without a proposal is unreviewed by the
+  // model, not agreed with — absence has to be visible.
+  const pv = d.proposed_total ? ` · ${d.proposed_total} proposals` : '';
+  $('rf-count').textContent = (d.total
     ? `${RF.off + 1}–${RF.off + d.events.length} of ${d.total}`
-    : 'nothing to refine in this class';
+    : 'nothing to refine in this class') + pv;
   $('rf-prev').disabled = RF.off === 0;
   $('rf-next').disabled = RF.off + d.events.length >= d.total;
   box.innerHTML = d.events.length ? '' : '<p class="empty">nothing to refine in this class</p>';
@@ -1294,7 +1333,11 @@ async function refineGrid() {
     const mark = () => {
       const to = RF.staged.has(rfKey(e)) ? RF.staged.get(rfKey(e)).to : null;
       div.querySelectorAll('button[data-to]')
-         .forEach(b => b.classList.toggle('on', b.dataset.to === to));
+         // Suggestion highlight only — a proposal is NEVER staged by itself: staging
+         // feeds the batch save, and machine output must not ride a bulk click. The
+         // per-card click is the human confirmation.
+         .forEach(b => { b.classList.toggle('on', b.dataset.to === to);
+                         b.classList.toggle('sg', !to && b.dataset.to === e.proposed); });
     };
     div.querySelectorAll('button[data-to]').forEach(b => b.onclick = () => {
       RF.staged.set(rfKey(e), {ev: e, to: b.dataset.to});
@@ -1505,7 +1548,8 @@ function odMatrix() {
 
 // Tier 0 is a reviewer's own call on the footage — better evidence than a shared tracker
 // id, and it must never wear tier 1's "same camera" label.
-const TIER = {0: ['s-ok', 'manual'], 1: ['s-ok', 'same camera'], 2: ['s-warn', 'inferred']};
+const TIER = {0: ['s-ok', 'manual'], 1: ['s-ok', 'same camera'], 2: ['s-warn', 'inferred'],
+              3: ['s-ok', 'plate'], 4: ['s-warn', 'visual']};
 
 // The overlay addresses events by (cam, obj_id, line, kind, ts) — a movement row carries
 // every part of that for both ends.
@@ -1540,7 +1584,11 @@ async function finder(en) {
     div.className = 'mv';
     div.innerHTML = cropFig(c.crop, c.cam, c.clock)
       + `<span class="state ${c.rc === d.rc ? 's-ok' : 's-idle'}">${esc(c.rc)}</span>`
-      + `<span class="sub">Δt ${c.dt}s · ${esc(c.line)}</span>`;
+      + `<span class="sub">Δt ${c.dt}s · ${esc(c.line)}</span>`
+      // A model's hint to the eye — the reviewer still judges the crops. Pairing
+      // happens only through the Pair click, same as an unbadged candidate. No
+      // detail text: the model's cited feature is often a plate fragment.
+      + (c.suggested ? `<span class="state s-warn">model: same vehicle?</span>` : '');
     const b = document.createElement('button');
     b.className = 'btn'; b.style.marginLeft = 'auto';
     b.textContent = 'Pair';

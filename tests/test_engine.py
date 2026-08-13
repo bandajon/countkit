@@ -222,7 +222,7 @@ def unverified_blocks():
 def queue_serialises():
     marks = []
 
-    def run_one(site, date, say, cancelled):
+    def run_one(site, date, say, cancelled, kind):
         marks.append(("start", time.time()))
         time.sleep(0.4)
         say(msg="done", pct=100)
@@ -261,6 +261,8 @@ def survives_restart():
             break
         time.sleep(0.1)
     assert len(seen) == 2, f"a job caught RUNNING by a restart was not re-run: {seen}"
+    # These rows predate job kinds entirely — they must restore and run as analyze.
+    assert all(a[4] == "analyze" for a in seen), seen
 
 
 def api_reports_state():

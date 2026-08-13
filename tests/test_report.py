@@ -210,7 +210,9 @@ def excel_opens_with_the_four_sheets():
                              "Summary"], wb.sheetnames
     method = {r[0]: r[1] for r in cell_rows(wb["Method"]) if r and r[0]}
     assert method["Site"] == SITE and method["Date"] == DATE, method
-    assert "two-tier" in method["Method"] and "inferred share" in method["Method"], method
+    # The Method text must name every pairing tier, including the plate evidence tier.
+    assert "licence-plate" in method["Method"] and "inferred share" in method["Method"], \
+        method
     assert method["Cross-camera inferred %"] == 1.0, method
     assert method["Inferred share of paired %"] == 100.0, method
     assert method["QA flags"] == 0, method

@@ -281,6 +281,17 @@ def analyze(site, date, ingest_root, data_root, detector, progress=None, cancell
                                     ln["kind"], ts, crop))
                         events += 1
         db.commit()
+        # Only after the commit, when this run is the standing one: the plate and
+        # vlmpair sidecars hold licence-plate strings (verbatim or as a model's cited
+        # "discriminative detail") whose evidence custody ended with the crops rmtree'd
+        # above — derived personal data must not outlive its source. Before the commit
+        # a crash rolls the OLD events back, and they keep their sidecars. The vlm and
+        # emb caches survive deliberately: class labels and feature vectors are not
+        # personal data, regenerating them costs GPU-hours, and after an offset-only
+        # re-run their rows still resolve within REFINE_SLACK — stale rows drop out
+        # visibly via the QA coverage surfaces, never silently.
+        for kind in ("plate", "vlmpair"):
+            (Path(data_root) / kind / f"{site}-{date}.jsonl").unlink(missing_ok=True)
     finally:
         # A no-op after the commit above; on any failure it puts the previous run's
         # events back whole. Accepted corner: this run's crop FILES stay on disk as
@@ -366,10 +377,11 @@ class Jobs:
         self._save()
         self.on_change()
 
-    def add(self, site, date):
+    def add(self, site, date, kind="analyze"):
         with self.lock:
             jid = max([j["id"] for j in self.jobs], default=0) + 1
-            job = {"id": jid, "site": site, "date": date, "state": "QUEUED",
+            job = {"id": jid, "site": site, "date": date, "kind": kind,
+                   "state": "QUEUED",
                    "queued": time.time(), "attempts": 0, "progress": {}, "log": [],
                    "result": None}
             self.jobs.append(job)
@@ -424,8 +436,10 @@ class Jobs:
                 self._changed()
 
             try:
+                # .get(): a jobs.json written before kinds existed restores as analyze.
                 job["result"] = self.run(job["site"], job["date"], say,
-                                         lambda: job["id"] in self.cancel_ids)
+                                         lambda: job["id"] in self.cancel_ids,
+                                         job.get("kind", "analyze"))
                 job["state"] = "DONE"
             except Cancelled:
                 job["state"] = "CANCELLED"
