@@ -104,14 +104,16 @@ class DeepStreamDetector:
                         om = pyds.NvDsObjectMeta.cast(ol.data)
                         r = om.rect_params
                         left, top = r.left * sx, r.top * sy
-                        w, h = r.width * sx, r.height * sy
+                        # bw/bh, not w/h: assigning w here would shadow the mux size
+                        # the sx/sy lines above read — UnboundLocalError on frame one.
+                        bw, bh = r.width * sx, r.height * sy
                         # The tracker genuinely restarts with each segment's pipeline, so
                         # ids recycle; cross-segment continuity would be fictional. Give
                         # engine's per-id state a fresh id space per segment.
                         objs.append({"id": seg_index * 1_000_000_000 + om.object_id,
                                      "cls": om.obj_label,
-                                     "bbox": [left, top, w, h],
-                                     "centroid": [left + w / 2, top + h / 2]})
+                                     "bbox": [left, top, bw, bh],
+                                     "centroid": [left + bw / 2, top + bh / 2]})
                         ol = ol.next
                     # pts is nanoseconds from the segment start — engine adds the
                     # segment's wallclock epoch and the camera's clock offset.
