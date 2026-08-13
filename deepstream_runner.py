@@ -11,12 +11,29 @@ The model is CONFIG, not code: nvinfer_config in config.yaml points at the
 TrafficCamNet ONNX now and the fine-tuned RT-DETR later, and at the RTX rig's own
 config with no change here (PRD acceptance #10)."""
 
+import subprocess
 from pathlib import Path
 
 import engine
 
 MISSING = ("DeepStream not available on this machine — install JetPack, or leave "
            "nvinfer_config empty to replay fixtures with the mock detector")
+
+
+def _video_size(path):
+    """(w, h) of a segment, or None. The mux must run at the footage's NATIVE
+    resolution: muxing 4K down to 1080p halves the linear detail before nvinfer
+    ever sees a frame — the exact far-field starvation measured on the yolo
+    backend (7 far-band vehicles at 960 vs 35 at 2560 on the same 4K frame)."""
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v",
+             "-show_entries", "stream=width,height", "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=20).stdout.strip()
+        w, h = (int(x) for x in out.split(",")[:2])
+        return (w, h) if w > 0 and h > 0 else None
+    except (ValueError, OSError, subprocess.SubprocessError):
+        return None
 
 
 def available():
@@ -57,10 +74,16 @@ class DeepStreamDetector:
         Gst.init(None)
         for seg_index, seg in enumerate(self.segments):
             out = []          # the probe appends; the pipeline runs to EOS per segment
+            # Native resolution, probed per segment: a fixed 1920x1080 mux silently
+            # downscales 4K footage before inference (the measured far-field
+            # starvation), and an upscaled 1080p wastes memory. Unknown = 1920x1080,
+            # and the probe's source_frame_width math still lands boxes in native
+            # pixels either way.
+            w, h = _video_size(self.dir / seg["file"]) or (1920, 1080)
             pipe = Gst.parse_launch(
                 f'filesrc location="{self.dir / seg["file"]}" ! matroskademux ! '
                 "h264parse ! nvv4l2decoder ! m.sink_0 nvstreammux name=m batch-size=1 "
-                "width=1920 height=1080 ! "
+                f"width={w} height={h} ! "
                 f'nvinfer config-file-path="{self.config}" ! '
                 "nvtracker ll-lib-file=/opt/nvidia/deepstream/deepstream/lib/"
                 "libnvds_nvmultiobjecttracker.so ! fakesink name=sink sync=0")
@@ -70,11 +93,12 @@ class DeepStreamDetector:
                 fl = batch.frame_meta_list
                 while fl:
                     fm = pyds.NvDsFrameMeta.cast(fl.data)
-                    # Gates are calibrated in the camera's NATIVE pixels, but nvstreammux
-                    # scaled every frame to 1920x1080 — scale the boxes back, or every
-                    # count on a non-1080p camera uses displaced gates. (0 = unknown.)
-                    sx = (fm.source_frame_width or 1920) / 1920
-                    sy = (fm.source_frame_height or 1080) / 1080
+                    # Gates are calibrated in the camera's NATIVE pixels; the mux now
+                    # runs at the probed native size, so this is normally 1.0 — but a
+                    # probe failure fell back to 1920x1080, and then the boxes must
+                    # still be mapped back to source pixels. (0 = unknown.)
+                    sx = (fm.source_frame_width or w) / w
+                    sy = (fm.source_frame_height or h) / h
                     objs, ol = [], fm.obj_meta_list
                     while ol:
                         om = pyds.NvDsObjectMeta.cast(ol.data)

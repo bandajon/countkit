@@ -25,6 +25,18 @@ RUN DS=/opt/nvidia/deepstream/deepstream; \
 COPY docker/install_pyds.sh /usr/local/bin/
 RUN bash /usr/local/bin/install_pyds.sh
 
+# The yolo11 bbox parser + engine builder for nvinfer, pinned for reproducibility.
+# Compiled IN this container (its CUDA toolchain is the ABI that matters): DS 7.1 =
+# CUDA 12.6 on Jetson. Bakes /opt/DeepStream-Yolo/.../libnvdsinfer_custom_impl_Yolo.so,
+# which docker/config_infer_yolo11.txt points at. The model itself (ONNX + labels +
+# built engine) lives on the operator's data volume, never in the image.
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+ && git clone https://github.com/marcoslucianops/DeepStream-Yolo.git /opt/DeepStream-Yolo \
+ && cd /opt/DeepStream-Yolo \
+ && git checkout 2894babce8e75c49115dbe0c7b516289ed853565 \
+ && CUDA_VER=12.6 make -C nvdsinfer_custom_impl_Yolo \
+ && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 COPY requirements.txt ./
 # ponytail: see Dockerfile.yolo — same PEP-668 fallback.

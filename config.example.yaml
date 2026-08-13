@@ -68,6 +68,13 @@ detector: ""
 # CountKit runs on the RTX rig by pointing this elsewhere. Empty = mock detector.
 nvinfer_config: ""
 
+# Settings for detector: deepstream — nvinfer_config points at an nvinfer file.
+# The yolo11 route (COCO taxonomy preserved, counts comparable with the yolo
+# backend): copy docker/config_infer_yolo11.txt plus the exported yolo11s.onnx
+# and labels.txt into data/models/yolo11-ds/, then:
+# nvinfer_config: ./data/models/yolo11-ds/config_infer_yolo11.txt
+# First DeepStream run builds the TensorRT engine there (>10 min on an Orin).
+
 # Settings for detector: yolo. Ignored by the other backends.
 yolo:
   # Ultralytics weights: a bundled name auto-downloads on first run, or a path to

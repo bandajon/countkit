@@ -1,0 +1,49 @@
+# nvinfer config: yolo11s under DeepStream 7.1 on Jetson Orin (FP16).
+#
+# The COCO taxonomy is the point: the same class map that serves the yolo backend
+# (car/bus/truck/motorcycle/bicycle/person) serves DeepStream unchanged, so counts
+# stay comparable across backends. Derived from marcoslucianops/DeepStream-Yolo
+# @ 2894bab config_infer_primary_yolo11.txt; changes: FP16, 1280x736 input (the
+# far-field lesson — 640 starves distant arms when frames are 4K), absolute paths
+# under the operator's data volume.
+#
+# First run builds the TensorRT engine from the ONNX (>10 min on an Orin Nano) and
+# caches it at model-engine-file — on the data volume, so container restarts skip
+# the rebuild. Engines are not portable across devices or TensorRT versions.
+# INT8 is deliberately absent: DS 7.1's TensorRT 10.3 breaks DeepStream-Yolo's
+# calibrator (upstream issue #675), and FP16 already outruns the decode.
+
+[property]
+gpu-id=0
+# 1/255 — ultralytics models expect 0-1 normalized input
+net-scale-factor=0.0039215697906911373
+# 0 = RGB (nvinfer converts from NV12)
+model-color-format=0
+onnx-file=/countkit/data/models/yolo11-ds/yolo11s.onnx
+# name encodes batch/gpu/precision; a mismatch makes nvinfer rebuild every start
+model-engine-file=/countkit/data/models/yolo11-ds/model_b1_gpu0_fp16.engine
+# one class per line, line number = class id (COCO order, auto-generated at export)
+labelfile-path=/countkit/data/models/yolo11-ds/labels.txt
+batch-size=1
+# 2 = FP16
+network-mode=2
+num-detected-classes=80
+# infer every frame handed over by the runner (stride happens upstream)
+interval=0
+gie-unique-id=1
+process-mode=1
+network-type=0
+# 2 = nvinfer-side NMS via [class-attrs-all] — required for YOLO11 (not YOLO26's 4)
+cluster-mode=2
+# ultralytics center-letterbox: BOTH required or accuracy quietly drops
+maintain-aspect-ratio=1
+symmetric-padding=1
+parse-bbox-func-name=NvDsInferParseYolo
+custom-lib-path=/opt/DeepStream-Yolo/nvdsinfer_custom_impl_Yolo/libnvdsinfer_custom_impl_Yolo.so
+engine-create-func-name=NvDsInferYoloCudaEngineGet
+
+[class-attrs-all]
+# matches the yolo backend's conf threshold so backends stay comparable
+pre-cluster-threshold=0.25
+nms-iou-threshold=0.45
+topk=300
