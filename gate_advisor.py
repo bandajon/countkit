@@ -185,8 +185,16 @@ def critique(config, site, cam, ingest_root, stats):
     import base64
     import urllib.request
     prompt = (
-        "This is a junction camera used for traffic counting. Gate lines are drawn "
-        "on it; vehicles are counted when their tracked centroid crosses a gate.\n"
+        "This is a junction camera in Lusaka, Zambia, used for traffic counting. "
+        "TRAFFIC DRIVES ON THE LEFT. At a roundabout, vehicles circulate CLOCKWISE "
+        "when seen from above. Facing the junction along any approach road, the "
+        "lanes feeding INTO the junction are on that road's left side (the camera "
+        "may see this mirrored depending on where it faces — reason it out from "
+        "the vehicles' visible directions of travel, which are ground truth). An "
+        "'entry' gate belongs across the feeding lanes only; an 'exit' gate across "
+        "the departing lanes only.\n"
+        "Gate lines are drawn on the image; vehicles are counted when their "
+        "tracked centroid crosses a gate.\n"
         f"Measured this session: {json.dumps(stats)}\n"
         "(edge_death_pct = share of vehicle tracks that end at the frame edge; "
         "gates maps each gate to its crossing count; proposed lists gates the "
