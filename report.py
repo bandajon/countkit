@@ -24,6 +24,9 @@ import calib
 COMPASS = {"N": 0, "E": 90, "S": 180, "W": 270}
 # Both taxonomies: the TOR classes and the pre-TOR labels an older fine-tune still emits.
 HEAVY = ("heavy_truck", "bus", "large_bus", "hgv_mineral", "hgv_non_mineral")
+# The unrefined bucket: a detected goods vehicle nobody has yet split into lgv/mgv/hgv.
+# Straddles the heavy boundary, so it blocks the heavy share rather than skewing it.
+REVIEW_QUEUE = "goods_vehicle"
 METHOD = ("Counts from camera analysis (CountKit); movements paired two-tier: "
           "same-camera tracker + cross-camera class/transit-time inference — "
           "inferred share reported per cell.")
@@ -168,14 +171,24 @@ def _mark(v, gaps):
 
 
 def _heavy_pct(d):
-    tot = heavy = gaps = 0
+    """(percent or None, no-footage bins, goods vehicles awaiting review).
+
+    None while goods_vehicle is unrefined: that bucket is unresolved between LGV (not
+    heavy) and HGV (heavy), so any percentage computed over it is a guess wearing a
+    measurement's clothes. Kalambo's 234 unrefined trucks would report 0.0% heavy —
+    a number the reader would take as "no heavy vehicles here". Refuse it instead, for
+    the same reason a coverage gap renders 'no footage' and never a zero."""
+    tot = heavy = gaps = pending = 0
     for b in d["bins"]:
         gaps += any(c["gap"] for c in b["arms"].values())
         for arm in b["arms"].values():
             for c, n in arm["classes"].items():
                 tot += n
                 heavy += n if c in HEAVY else 0
-    return (round(heavy / tot * 100, 1) if tot else 0.0), gaps
+                pending += n if c == REVIEW_QUEUE else 0
+    if pending:
+        return None, gaps, pending
+    return (round(heavy / tot * 100, 1) if tot else 0.0), gaps, pending
 
 
 def _cell(v):
@@ -399,9 +412,11 @@ def _excel(path, d, config):
     n, g = _total(d)
     marked |= bool(g)
     ws.append(["Day total entering", _mark(n, g)])
-    hv, hg = _heavy_pct(d)
+    hv, hg, hp = _heavy_pct(d)
     marked |= bool(hg)
-    ws.append(["% heavy (bus + heavy truck)", _mark(hv, hg)])
+    ws.append(["% heavy (large bus + HGV)",
+               f"pending review of {hp} goods vehicles" if hv is None
+               else _mark(hv, hg)])
     for a in arms:
         n, g = _total(d, a)
         marked |= bool(g)
@@ -532,7 +547,10 @@ def _pdf(path, d, config):
 
     bx, by = 130 * mm, y - 30 * mm
     peak_n, peak_g = _total(d, bins=_bins_in(d, "am")) if peak else (0, 0)
-    heavy, heavy_g = _heavy_pct(d)
+    heavy, heavy_g, heavy_p = _heavy_pct(d)
+    # An em dash, as the PDF already uses for an absent peak — a headline numeral has no
+    # room for the explanation, and the Method sheet carries it.
+    heavy_s = "—" if heavy is None else f"{_mark(heavy, heavy_g)}%"
     day_n, day_g = _total(d)
     c.setFont("Helvetica-Bold", 8)
     c.drawString(bx, by, "AM PEAK")
@@ -541,7 +559,7 @@ def _pdf(path, d, config):
             f"interval {peak['start'][11:16] if peak else '—'}",
             f"total entering {_mark(peak_n, peak_g)}",
             f"PHF {peak['phf'] if peak else '—'}",
-            f"% heavy {_mark(heavy, heavy_g)}",
+            f"% heavy {heavy_s}",
             f"pairing {pr['rate']}% ({pr['inferred']}% inferred)",
             "arrows kerb-first (LHT)"]):
         c.drawString(bx, by - 5 * mm - i * 4.4 * mm, line)
@@ -553,7 +571,7 @@ def _pdf(path, d, config):
             (str(_mark(peak_n, peak_g)), "AM PEAK ENTERING"),
             (str(peak["phf"] if peak else "—"), "PHF"),
             (str(_mark(day_n, day_g)), "DAY TOTAL"),
-            (f"{heavy}%" + ("*" if heavy_g else ""), "HEAVY")]):
+            (heavy_s, "HEAVY")]):
         ry = hy - i * 14 * mm
         c.setFont("Helvetica-Bold", 17)
         c.drawString(bx, ry, num)

@@ -23,14 +23,17 @@ site_tz: Africa/Lusaka
 classes:
   - {model: car, report: passenger_car}
   - {model: minibus, report: minibus_medium_bus}
-  - {model: bus, report: large_bus}
+  # Lusaka: 46 of 50 labelled 'bus' crops were Hiace minibuses or Coaster-type
+  # medium buses, which the TOR folds into ONE class — so the majority mapping is
+  # minibus_medium_bus, not large_bus. The ~8% genuine coaches are refined by hand
+  # in Counts -> Refine classes. Re-measure this ratio at a long-distance terminus.
+  - {model: bus, report: minibus_medium_bus}
   - {model: truck, report: goods_vehicle}
   - {model: heavy_truck, report: hgv_non_mineral}
   - {model: motorcycle, report: other}
   - {model: bicycle, report: other}
   # COCO labels, as emitted by a stock YOLO model (car/truck/motorcycle/bicycle
   # already appear above and need no second row):
-  # - {model: bus, report: large_bus}
   - {model: person, report: pedestrian}   # not a vehicle: counted, excluded from vehicle tables
 
 # Passenger-car-unit factors per report class, applied only when the PCU toggle is on.

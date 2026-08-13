@@ -242,7 +242,10 @@ def phf_matches_the_hand_computation():
     assert summary["AM peak entering volume"] == 100, summary
     assert summary["AM peak PHF"] == hand, summary
     # Anything summed over the whole day crosses the 08:00–09:00 hole and must say so.
-    assert summary["% heavy (bus + heavy truck)"] == "2.0*", summary   # 2 buses in 100
+    # The two 'bus' detections are minibuses (measured: 46 of 50 such crops in Lusaka),
+    # and the TOR counts a minibus as neither a large bus nor a heavy vehicle. With no
+    # HGV and no unrefined goods vehicle in this fixture, 0.0 is measured, not withheld.
+    assert summary["% heavy (large bus + HGV)"] == "0.0*", summary
     assert summary[f"Entering {GE}"] == "100*", summary
     assert summary["Day total entering"] == "100*", summary
 
@@ -581,6 +584,30 @@ check("a human-refined run states its provenance", a_refined_run_states_its_prov
 check("PDF renders with the diagram, matrix and footnotes", pdf_is_a_real_pdf)
 check("probe attribution appears only with a dataset", probe_page_only_when_configured)
 check("downloads are limited to manifested names", files_come_only_from_the_manifest)
+def heavy_share_is_withheld_while_goods_vehicles_await_review():
+    """An unrefined goods_vehicle is unresolved between LGV (not heavy) and HGV (heavy),
+    so the heavy share cannot be computed — and 0.0 would read as 'no heavy vehicles'.
+
+    A synthetic payload, because the point is the arithmetic gate, not the workbook."""
+    payload = lambda cls: {"bins": [{"arms": {"A": {"classes": cls, "gap": False}}}]}
+    # Nothing pending: a measured share, large_bus over the total.
+    v, gaps, pend = report._heavy_pct(payload({"passenger_car": 90, "large_bus": 10}))
+    assert (v, pend) == (10.0, 0), (v, gaps, pend)
+    # One unrefined truck is enough to withhold it — it may or may not be an HGV.
+    v, gaps, pend = report._heavy_pct(payload({"passenger_car": 90, "goods_vehicle": 10}))
+    assert v is None and pend == 10, (v, gaps, pend)
+    # And the withholding is about the queue, not about there being no heavy vehicles:
+    # a known HGV alongside an unrefined truck is still not a computable share.
+    v, gaps, pend = report._heavy_pct(payload({"hgv_mineral": 5, "goods_vehicle": 5}))
+    assert v is None and pend == 5, (v, gaps, pend)
+    # Minibuses are not heavy: the TOR names them apart from heavy vehicles.
+    v, gaps, pend = report._heavy_pct(payload({"passenger_car": 90,
+                                               "minibus_medium_bus": 10}))
+    assert (v, pend) == (0.0, 0), (v, gaps, pend)
+
+
+check("heavy share is withheld while goods vehicles await review",
+      heavy_share_is_withheld_while_goods_vehicles_await_review)
 check("status reads the manifest; absent is absent", status_reads_the_manifest)
 check("an unanalyzed site-day refuses to export", nothing_analyzed_refuses)
 check("turn classification reads left-hand traffic", turns_read_left_hand_traffic)
