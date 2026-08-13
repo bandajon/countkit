@@ -95,6 +95,11 @@ def the_proposal_validates_and_saves_as_a_normal_version():
 def the_endpoint_serves_a_run_and_404s_before_one():
     r = C.get(f"/api/advisor/{SITE}/cam9")
     assert r.status_code == 404 and "gate_advisor.py" in r.json()["detail"], r.text
+    # Pinned to the ORIGINAL calibration: the previous test activated its saved
+    # advisor proposal, whose exit line already sits in the flow — run() against
+    # that would rightly propose nothing, and this test's verdict would depend on
+    # test order instead of the fixture.
+    calib.set_active(SITE, CAM, 1)
     out = gate_advisor.run(SITE, "2026-08-04", CAM, app.data_root(), TMP / "ingest",
                            {}, tracks=tracks_dying_early())
     assert out["proposed_gates"] == ["North/exit"], out

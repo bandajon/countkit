@@ -71,6 +71,30 @@ def _principal_segment(points, span=1.5):
             [round(cx + vx * span * sigma, 1), round(cy + vy * span * sigma, 1)])
 
 
+def _flow_dir(tracks, cloud, radius=150.0):
+    """Mean unit velocity of track steps near the cloud's centroid — which way
+    traffic actually travels there. None when too little flow passes nearby."""
+    n = len(cloud)
+    cx = sum(p[0] for p in cloud) / n
+    cy = sum(p[1] for p in cloud) / n
+    vx = vy = 0.0
+    hits = 0
+    for pts in tracks.values():
+        for a, b in zip(pts, pts[1:]):
+            mx, my = (a[0] + b[0]) / 2, (a[1] + b[1]) / 2
+            if (mx - cx) ** 2 + (my - cy) ** 2 <= radius * radius:
+                dx, dy = b[0] - a[0], b[1] - a[1]
+                norm = (dx * dx + dy * dy) ** 0.5
+                if norm > 1.0:                      # standing still is not flow
+                    vx += dx / norm
+                    vy += dy / norm
+                    hits += 1
+    if hits < 20:
+        return None
+    norm = (vx * vx + vy * vy) ** 0.5
+    return (vx / norm, vy / norm) if norm > 0.3 * hits ** 0.5 else None
+
+
 def advise(tracks, cal):
     """(proposal calibration doc, stats). Healthy gates pass through verbatim;
     starved ones are re-drawn through the nearby terminal cloud. Proposing is free —
@@ -92,13 +116,29 @@ def advise(tracks, cal):
             near = sorted(deaths, key=lambda p: (p[0] - mx) ** 2 + (p[1] - my) ** 2)
             cloud = near[:max(10, len(near) // 4)]
         if cloud and len(cloud) >= 10:
-            a, b = _principal_segment(cloud)
+            # Perpendicular to the measured flow when flow is measurable: death
+            # clouds smear ALONG a road (the tracker drops shrinking vehicles), so
+            # a cloud-axis fit proposes a line traffic drives along, not across —
+            # reviewed live on a roundabout's exits. PCA stays as the fallback.
+            fd = _flow_dir(tracks, cloud)
+            if fd is not None:
+                n = len(cloud)
+                cx = sum(p[0] for p in cloud) / n
+                cy = sum(p[1] for p in cloud) / n
+                px, py = -fd[1], fd[0]          # rotate flow 90°: across the road
+                span = 90.0                     # ~a two-lane carriageway; operator drags
+                a = [round(cx - px * span, 1), round(cy - py * span, 1)]
+                b = [round(cx + px * span, 1), round(cy + py * span, 1)]
+                why = (f"gate saw {g['crossings']} crossings vs {best} on this "
+                       f"camera's best gate; re-drawn ACROSS the measured flow at "
+                       f"the {len(cloud)}-point track-loss cluster")
+            else:
+                a, b = _principal_segment(cloud)
+                why = (f"gate saw {g['crossings']} crossings vs {best} on this "
+                       f"camera's best gate; re-drawn through the {len(cloud)} "
+                       "nearest track terminal points (no measurable flow nearby)")
             lines.append({**line, "points": [a, b],
-                          "advisor": {"replaces": line["points"],
-                                      "why": f"gate saw {g['crossings']} crossings vs "
-                                             f"{best} on this camera's best gate; "
-                                             f"re-drawn through the {len(cloud)} "
-                                             "nearest track terminal points"}})
+                          "advisor": {"replaces": line["points"], "why": why}})
             proposed.append(key)
         else:
             lines.append(dict(line))
