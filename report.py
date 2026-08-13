@@ -99,7 +99,9 @@ def _hours(d):
 
 
 def _inf(n, inf):
-    return f"{n} ({inf} inf)" if inf else n
+    """'inferred' spelled out: a reviewer read '(104 inf)' as infinity — an
+    abbreviation that can be mistaken for a number does not belong in a deliverable."""
+    return f"{n} ({inf} inferred)" if inf else n
 
 
 def _turn_cols(unplaced):
@@ -623,7 +625,7 @@ def _pdf(path, d, config):
             for j, ex in enumerate(arms):
                 n, inf = grid.get((en, ex), (0, 0))
                 c.drawString(52 * mm + j * colw, ry,
-                             f"{n} ({inf} inf)" if inf else str(n))
+                             f"{n} ({inf} inferred)" if inf else str(n))
 
     fy = 24 * mm
     c.setFont("Helvetica", 6.5)

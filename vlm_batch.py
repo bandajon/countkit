@@ -125,6 +125,13 @@ def run(site, date, data_root, config, progress=None, cancelled=None, ask=None):
         "WHERE site=? AND date=? AND kind='entry' AND crop IS NOT NULL "
         "ORDER BY corrected_ts", (site, date)).fetchall()
     db.close()
+    # The measured gate: proposals ship only for detector classes where the model
+    # cleared the accuracy bar against hand labels (piloted 2026-08-13: the goods
+    # queue at 80%, minibus/car classes below the bar — Coasters read as large_bus).
+    # An unset list proposes for everything; the shipped config names the gate.
+    only = (config.get("vlm") or {}).get("classes")
+    if only:
+        rows = [r for r in rows if r[2] in only]
 
     # Reuse standing proposals from the same model: a resumed batch re-asks nothing.
     out_path = aggregate._sidecar(data_root, "vlm", site, date)

@@ -293,7 +293,7 @@ def a_formula_arm_name_cannot_execute_or_crash():
 def an_inferred_cell_is_labelled():
     rows = cell_rows(load_workbook(bundle(f"{STEM}.xlsx"))["Movements"])
     flat = [v for r in rows for v in r]
-    assert "1 (1 inf)" in flat, [v for v in flat if v]
+    assert "1 (1 inferred)" in flat, [v for v in flat if v]
     assert any(str(v).startswith("AM peak — entry") for v in flat), flat[:8]
     assert any(str(v).startswith("Full day — entry") for v in flat), "day block missing"
 
@@ -377,11 +377,11 @@ def turns_sheet_splits_left_through_right():
     head = next(r for r in rows if r[0] == "Hour")
     left = head.index("Left")
     hour = next(r for r in rows if r[0] == "07:00" and r[1] == GE)
-    assert hour[left] == "1 (1 inf)", hour        # the one cross-camera pair, N -> E
+    assert hour[left] == "1 (1 inferred)", hour        # the one cross-camera pair, N -> E
     assert hour[-1] == 1 and hour[left + 1] == 0, hour
     cls = payload()["movements"]["od"][0]["cls"]   # whatever the class map calls a car
     byclass = next(r for r in rows if r[0] == GE and r[1] == cls)
-    assert byclass[left] == "1 (1 inf)", byclass
+    assert byclass[left] == "1 (1 inferred)", byclass
     flat = [str(v) for r in rows for v in r if v is not None]
     assert "no PM peak recorded" in flat, "a missing peak must be named here too"
     assert any(v.startswith("Full day — turning") for v in flat), flat
@@ -397,7 +397,7 @@ def untagged_arms_fall_back_to_schematic_order():
     # the same movement now reads as a right turn, and it is labelled, not dropped.
     head = next(r for r in rows if r[0] == "Hour")
     hour = next(r for r in rows if r[0] == "07:00" and r[1] == GE)
-    assert hour[head.index("Right")] == "1 (1 inf)", hour
+    assert hour[head.index("Right")] == "1 (1 inferred)", hour
     assert hour[head.index("Left")] == 0, hour
 
 

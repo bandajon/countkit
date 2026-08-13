@@ -192,6 +192,21 @@ def a_hosted_endpoint_is_refused_before_any_crop_leaves():
             pass
 
 
+def the_class_gate_limits_what_the_batch_asks_about():
+    """vlm.classes is the measured pilot gate: only detector classes that cleared the
+    accuracy bar get proposals — a car crop is never asked about, even though the
+    model would happily answer."""
+    real = crop_file("gated.jpg")
+    write([("cam1", 1, "truck", GE, "entry", ts("07:03"), real),
+           ("cam1", 2, "car", GE, "entry", ts("07:04"), real)])
+    (TMP / "data" / "vlm" / f"{SITE}-{DATE}.jsonl").unlink(missing_ok=True)
+    cfg = {**app.CONFIG, "vlm": {"model": "t", "classes": ["truck"]}}
+    res = vlm_batch.run(SITE, DATE, app.data_root(), cfg, ask=lambda b: "mgv")
+    assert res["proposed"] == 1, res
+    row = json.loads((TMP / "data" / "vlm" / f"{SITE}-{DATE}.jsonl").read_text())
+    assert row["obj_id"] == 1, row
+
+
 def the_queue_accepts_a_vlm_job_only_after_analysis():
     db = engine.connect(app.data_root(), "emptysite")
     db.close()
@@ -296,6 +311,8 @@ check("the batch skips what it cannot see and says so",
       the_batch_skips_what_it_cannot_see_and_says_so)
 check("a hosted endpoint is refused before any crop leaves",
       a_hosted_endpoint_is_refused_before_any_crop_leaves)
+check("the class gate limits what the batch asks about",
+      the_class_gate_limits_what_the_batch_asks_about)
 check("the queue accepts a vlm job only after analysis",
       the_queue_accepts_a_vlm_job_only_after_analysis)
 

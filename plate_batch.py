@@ -29,8 +29,13 @@ def _ocr():
                          "(ONNX plate detector + OCR, CPU is fine)")
     import cv2
     import numpy as np
+    # CPU pinned: onnxruntime's CoreML provider rejects this model's dynamic shapes
+    # (measured live: "Size (9) of dimension (2) is not in allowed range"), and CPU
+    # is ~13 ms/crop here anyway — a whole site-day in about a minute.
+    cpu = ["CPUExecutionProvider"]
     alpr = ALPR(detector_model="yolo-v9-t-384-license-plate-end2end",
-                ocr_model="global-plates-mobile-vit-v2-model")
+                ocr_model="global-plates-mobile-vit-v2-model",
+                detector_providers=cpu, ocr_providers=cpu)
 
     def read(blob):
         """crop bytes -> (normalized plate, confidence) or (None, 0)."""
@@ -40,8 +45,14 @@ def _ocr():
         best, conf = None, 0.0
         for r in alpr.predict(img):
             o = getattr(r, "ocr", None)
-            if o and o.text and o.confidence > conf:
-                best, conf = o.text, float(o.confidence)
+            if not (o and o.text):
+                continue
+            # Per-character confidences in this fast-alpr: a plate read is only as
+            # reliable as its worst character, so the floor compares against min().
+            c = o.confidence
+            c = min(c) if isinstance(c, (list, tuple)) else float(c)
+            if c > conf:
+                best, conf = o.text, c
         if not best:
             return None, 0.0
         # Normalized before storage so edit distance compares signal, not formatting.
