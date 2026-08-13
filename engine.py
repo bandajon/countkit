@@ -101,6 +101,24 @@ def crosses(p1, p2, a, b):
     return (d1 > 0) != (d2 > 0) and (d3 > 0) != (d4 > 0)
 
 
+def scale_lines(lines, cal_size, frame_size):
+    """Gate lines rescaled from the calibration's drawing resolution to the frames
+    actually being decoded. Same size = the very lists passed in; a detector that
+    exposes no frame size keeps the historic contract (coords compared raw).
+
+    This is what lets an ingest tree be swapped between the 1080p transcodes and
+    the 4K originals without redrawing a single gate: a line cutting a road at
+    [960, 540] of 1920x1080 still cuts the same road at [1920, 1080] of 4K.
+    Reviewed live: without it, every gate sat in the top-left quadrant and a
+    site-day analyzed to near-zero events."""
+    if not (cal_size and frame_size) or tuple(cal_size) == tuple(frame_size):
+        return lines
+    sx = frame_size[0] / cal_size[0]
+    sy = frame_size[1] / cal_size[1]
+    return [{**ln, "points": [[x * sx, y * sy] for x, y in ln["points"]]}
+            for ln in lines]
+
+
 def gate_crossing(line, prev, cur):
     """None when the step misses the gate; True when it crossed in the gate's counted
     direction, False when against it.
@@ -236,16 +254,24 @@ def analyze(site, date, ingest_root, data_root, detector, progress=None, cancell
     try:
         for cam in cams:
             try:
-                lines = calib.get_calibration(site, cam)["lines"]
+                cal = calib.get_calibration(site, cam)
+                lines = cal["lines"]
             except LookupError:
                 say(cam=cam, msg=f"{cam}: no calibration — skipped", pct=done_segs * 100 // total)
                 done_segs += len(dets[cam].segments)
                 continue
+            # Lazily, on the first yield: the detector learns its frame size from the
+            # decoder, which does not exist until iteration starts.
+            lines_scaled = False
             last_seen, last_cross, seg_now, last_media = {}, {}, None, None
             crop_for = getattr(dets[cam], "crop_for", None)
             for seg, t, objects in dets[cam]:
                 if stop():
                     raise Cancelled()
+                if not lines_scaled:
+                    lines = scale_lines(lines, cal.get("image_size"),
+                                        getattr(dets[cam], "frame_size", None))
+                    lines_scaled = True
                 if seg != seg_now:
                     seg_now, base = seg, segment_epoch(seg)
                     if last_media is not None and base - last_media > GAP_RESET_S:

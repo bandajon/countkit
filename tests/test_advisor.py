@@ -110,6 +110,35 @@ def the_endpoint_serves_a_run_and_404s_before_one():
     assert a["critique"] is None, "no endpoint configured must mean no critique"
 
 
+def a_1080p_calibration_measures_4k_tracks():
+    """The live bug: gates drawn on 1080p reference frames, footage swapped for the
+    4K originals — without scaling, every line sits in the top-left quadrant and a
+    site-day analyzes to near-zero. Tracks here are the fixture's, doubled into 4K
+    coordinates; the verdict must match the native-resolution one, and the proposal
+    must come back in the CALIBRATION's coordinate space for the Label draft."""
+    tracks4k = {t: [(x * 2, y * 2) for x, y in pts]
+                for t, pts in tracks_dying_early().items()}
+    doc, stats = gate_advisor.advise(tracks4k, CAL, frame_size=(1280, 960))
+    assert stats["gates"]["North/entry"] == 40, stats["gates"]
+    assert stats["proposed"] == ["North/exit"], stats
+    new = [l for l in doc["lines"] if l["kind"] == "exit"][0]
+    ys = [p[1] for p in new["points"]]
+    # Terminal cloud sits at 4K y≈590-600; mapped back to 1080p space: ~295-300.
+    assert all(250 < y < 350 for y in ys), new["points"]
+    assert doc["image_size"] == [640, 480], doc["image_size"]
+    import calib as _c
+    _c._validate(doc)
+    # And the engine-side scaler that analysis itself uses:
+    scaled = engine.scale_lines(CAL["lines"], CAL["image_size"], (1280, 960))
+    assert scaled[0]["points"] == [[200, 200], [1000, 200]], scaled[0]["points"]
+    assert engine.scale_lines(CAL["lines"], CAL["image_size"], None) is CAL["lines"]
+    assert engine.scale_lines(CAL["lines"], CAL["image_size"],
+                              (640, 480)) is CAL["lines"]
+
+
+import engine                                   # noqa: E402
+
+check("a 1080p calibration measures 4K tracks", a_1080p_calibration_measures_4k_tracks)
 check("the analytics find the starved gate", the_analytics_find_the_starved_gate)
 check("a healthy junction proposes nothing", a_healthy_junction_proposes_nothing)
 check("the proposal validates and saves as a normal version",

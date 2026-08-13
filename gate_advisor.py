@@ -30,11 +30,15 @@ STARVED = 0.25       # a gate crossing under this share of its camera's best is 
 EDGE_PX = 0.03       # terminal points within this fraction of a border = frame-edge
 
 
-def _track_stats(tracks, cal):
-    """Pure analytics over {tid: [(x, y), ...]} against one calibration."""
-    w, h = cal["image_size"]
+def _track_stats(tracks, cal, frame_size=None):
+    """Pure analytics over {tid: [(x, y), ...]} against one calibration. Tracks are
+    in the CAPTURED frames' pixels; lines scale from the calibration's drawing
+    resolution when the two differ (engine.scale_lines, the same contract analysis
+    uses)."""
+    w, h = frame_size or cal["image_size"]
+    lines = engine.scale_lines(cal["lines"], cal.get("image_size"), frame_size)
     gates = {f'{l["name"]}/{l["kind"]}': {"line": l, "crossings": 0}
-             for l in cal["lines"]}
+             for l in lines}
     deaths, edge_deaths = [], 0
     for pts in tracks.values():
         for prev, cur in zip(pts, pts[1:]):
@@ -95,11 +99,13 @@ def _flow_dir(tracks, cloud, radius=150.0):
     return (vx / norm, vy / norm) if norm > 0.3 * hits ** 0.5 else None
 
 
-def advise(tracks, cal):
+def advise(tracks, cal, frame_size=None):
     """(proposal calibration doc, stats). Healthy gates pass through verbatim;
     starved ones are re-drawn through the nearby terminal cloud. Proposing is free —
-    binding is the reviewer's Save."""
-    gates, deaths, edge_deaths = _track_stats(tracks, cal)
+    binding is the reviewer's Save. frame_size: the captured frames' (w, h) when it
+    differs from the calibration's drawing resolution; proposal coordinates are
+    mapped BACK to the calibration's space so the Label tab draft lands right."""
+    gates, deaths, edge_deaths = _track_stats(tracks, cal, frame_size)
     best = max((g["crossings"] for g in gates.values()), default=0)
     stats = {"tracks": len(tracks),
              "edge_death_pct": round(edge_deaths / max(len(tracks), 1) * 100, 1),
@@ -137,11 +143,23 @@ def advise(tracks, cal):
                 why = (f"gate saw {g['crossings']} crossings vs {best} on this "
                        f"camera's best gate; re-drawn through the {len(cloud)} "
                        "nearest track terminal points (no measurable flow nearby)")
-            lines.append({**line, "points": [a, b],
-                          "advisor": {"replaces": line["points"], "why": why}})
+            # Proposal points are in CAPTURE pixels; the doc must be in the
+            # calibration's drawing space or the Label draft lands off-canvas.
+            if frame_size and tuple(frame_size) != tuple(cal["image_size"]):
+                ux = cal["image_size"][0] / frame_size[0]
+                uy = cal["image_size"][1] / frame_size[1]
+                a = [round(a[0] * ux, 1), round(a[1] * uy, 1)]
+                b = [round(b[0] * ux, 1), round(b[1] * uy, 1)]
+            orig = next(l for l in cal["lines"]
+                        if l["name"] == line["name"] and l["kind"] == line["kind"])
+            lines.append({**orig, "points": [a, b],
+                          "advisor": {"replaces": orig["points"], "why": why}})
             proposed.append(key)
         else:
-            lines.append(dict(line))
+            # Healthy gates pass through in the calibration's own coordinates.
+            lines.append(dict(next(l for l in cal["lines"]
+                                   if l["name"] == line["name"]
+                                   and l["kind"] == line["kind"])))
     doc = {"image_size": list(cal["image_size"]), "lines": lines,
            "note": "gate-advisor proposal — reviewed and saved by an operator"}
     stats["proposed"] = proposed
@@ -160,16 +178,18 @@ def capture(ingest_root, date, site, cam, n_segments=2, stride=3):
     if not segs:
         raise LookupError(f"no footage for {site}/{cam} on {date}")
     model = YOLO("yolo11s.pt")
-    tracks = {}
+    tracks, size = {}, None
     for seg in segs:
         for res in model.track(source=str(seg), stream=True, persist=True,
                                vid_stride=stride, verbose=False):
+            if size is None:
+                size = (int(res.orig_shape[1]), int(res.orig_shape[0]))   # (w, h)
             if res.boxes is None or res.boxes.id is None:
                 continue
             for tid, xywh in zip(res.boxes.id.tolist(), res.boxes.xywh.tolist()):
                 x, y, _w, _h = xywh
                 tracks.setdefault(int(tid), []).append((float(x), float(y)))
-    return {t: p for t, p in tracks.items() if len(p) >= 2}
+    return {t: p for t, p in tracks.items() if len(p) >= 2}, size
 
 
 def critique(config, site, cam, ingest_root, stats):
@@ -235,10 +255,12 @@ def advisor_path(data_root, site, cam):
     return d / f"{site}-{cam}.json"
 
 
-def run(site, date, cam, data_root, ingest_root, config, tracks=None):
-    tracks = tracks if tracks is not None else capture(ingest_root, date, site, cam)
+def run(site, date, cam, data_root, ingest_root, config, tracks=None,
+        frame_size=None):
+    if tracks is None:
+        tracks, frame_size = capture(ingest_root, date, site, cam)
     cal = calib.get_calibration(site, cam)
-    doc, stats = advise(tracks, cal)
+    doc, stats = advise(tracks, cal, frame_size)
     calib._validate(doc)        # a proposal the Save button would refuse helps nobody
     out = {"proposal": doc, "stats": stats,
            "critique": critique(config, site, cam, ingest_root, stats),
@@ -266,5 +288,6 @@ if __name__ == "__main__":
     calib.DATA_ROOT = dr
     site, date, cam = sys.argv[1], sys.argv[2], sys.argv[3]
     n = int(sys.argv[4]) if len(sys.argv) > 4 else 2
-    res = run(site, date, cam, dr, ir, cfg, tracks=capture(ir, date, site, cam, n))
+    tracks, size = capture(ir, date, site, cam, n)
+    res = run(site, date, cam, dr, ir, cfg, tracks=tracks, frame_size=size)
     print(json.dumps(res, indent=2))

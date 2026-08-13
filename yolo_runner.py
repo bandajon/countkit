@@ -95,6 +95,11 @@ class YoloDetector:
             # finally, not a release at the end: a cancel raised through the yield or a
             # model failure in _objects would otherwise leak the capture and its decoder.
             try:
+                # Detections are in THESE pixels. engine scales gate lines to match —
+                # a calibration drawn on a 1080p reference must still cut the same road
+                # when the ingest is swapped for the 4K originals.
+                self.frame_size = (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+                                   int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
                 fps = cap.get(cv2.CAP_PROP_FPS)
                 if not fps or fps != fps or fps <= 0:      # 0, or NaN on a broken header
                     raise ValueError(f'{seg["file"]}: unreadable fps — is this a FieldKit '
