@@ -836,10 +836,26 @@ async function frame() {
   LAB.z = wrap.clientWidth / img.naturalWidth; LAB.ox = LAB.oy = 0;   // fit to view
 }
 
+// Rescale a calibration to the reference frame being DISPLAYED: a gate drawn on a
+// 1080p transcode keeps cutting the same road when the ingest is swapped for the 4K
+// originals. Saving afterwards records the current resolution — the analysis-side
+// twin of engine.scale_lines, so what you see is exactly what is measured.
+function normCal(doc) {
+  if (!doc || !LAB.img) return doc;
+  const w = LAB.img.naturalWidth, h = LAB.img.naturalHeight;
+  const [cw, ch] = doc.image_size && doc.image_size.length === 2
+    ? doc.image_size : [w, h];
+  if (cw === w && ch === h) return doc;
+  doc.lines = (doc.lines || []).map(l => ({ ...l,
+    points: l.points.map(([x, y]) => [x * w / cw, y * h / ch]) }));
+  doc.image_size = [w, h];
+  return doc;
+}
+
 async function calibration() {
   const r = await fetch(`/api/calib/${LAB.site}/${LAB.cam}`);
   const size = LAB.img ? [LAB.img.naturalWidth, LAB.img.naturalHeight] : [1920, 1080];
-  LAB.work = r.ok ? await r.json() : { image_size: size, lines: [] };
+  LAB.work = normCal(r.ok ? await r.json() : { image_size: size, lines: [] });
 }
 
 async function versions() {
@@ -858,7 +874,7 @@ $('l-ver').onchange = async () => {
   if (!v) { LAB.view = LAB.viewing = null; $('viewbanner').className = ''; $('l-activate').hidden = true; }
   else {
     LAB.viewing = +v;
-    LAB.view = await (await fetch(`/api/calib/${LAB.site}/${LAB.cam}?version=${v}`)).json();
+    LAB.view = normCal(await (await fetch(`/api/calib/${LAB.site}/${LAB.cam}?version=${v}`)).json());
     $('viewbanner').textContent = `viewing v${v} — read-only. Activate it to make it the one`
       + ' analysis uses, or switch back to the working copy to keep editing.';
     $('viewbanner').className = 'on';
@@ -885,7 +901,7 @@ $('l-advisor').onclick = async () => {
   $('l-res').className = 'res ' + (r.ok ? 'good' : 'bad');
   if (!r.ok) { $('l-res').textContent = await detail(r); return; }
   const a = await r.json();
-  LAB.work = a.proposal;
+  LAB.work = normCal(a.proposal);
   LAB.dirty = true;
   LAB.sel = -1; LAB.draw = null;
   const c = a.critique;
